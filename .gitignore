@@ -1,0 +1,61 @@
+## Gradle
+.gradle/
+build/
+**/build/
+
+## Android generated natives (copied by copyAndroidNatives task)
+/android/libs/armeabi-v7a/
+/android/libs/arm64-v8a/
+/android/libs/x86/
+/android/libs/x86_64/
+
+## Local SDK paths — machine-specific
+local.properties
+
+## RoboVM / iOS build output
+/ios/robovm-build/
+/ios/xcode/*.xcodeproj/*
+!/ios/xcode/*.xcodeproj/xcshareddata
+!/ios/xcode/*.xcodeproj/project.pbxproj
+/ios/xcode/native/
+/ios/IOSLauncher.app
+/ios/IOSLauncher.app.dSYM
+
+## IDEs
+.idea/
+*.ipr
+*.iws
+*.iml
+.classpath
+.project
+.settings/
+.metadata/
+.externalToolBuilders/
+*.launch
+.loadpath
+.kotlin/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Assets
+assets/
+assets_debug/
+
+## Dex tools
+dex-tools-v2.4/
+
+## Vendored JARs
+libs/game.jar
+
+## AI / internal docs
+docs/for-claude/
+
+## Misc
+*.class
+*.tmp
+*.bak
+*.swp
+*~
+*.*#

@@ -1,0 +1,71 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.9.3"
+    }
+}
+
+// Strips desktop-only content from libs/game.jar → build/stripped/game-stripped.jar.
+// Removes: lwjgl3 backend, desktop launcher, Windows/macOS/Linux natives (.dll/.dylib/desktop .so),
+//          LWJGL classes, Steamworks, desktop audio codecs (jcraft/javazoom), META-INF/maven.
+tasks.register('stripGameJar', Zip) {
+    group = 'porter'
+    description = 'Strips desktop-only content from game.jar.'
+    archiveFileName = 'game-stripped.jar'
+    destinationDirectory = layout.buildDirectory.dir('stripped')
+    from(zipTree(file('libs/game.jar'))) {
+        // Desktop backend
+        exclude 'com/badlogic/gdx/backends/lwjgl3/**'
+        // Desktop launcher
+        exclude 'aoc/kingdoms/lukasz/jakowski/desktop/**'
+        // Windows DLLs
+        exclude '*.dll'
+        // macOS dylibs
+        exclude '*.dylib'
+        // Linux desktop .so files bundled by the desktop build
+        exclude 'libgdx*.so'
+        exclude 'libsteam*.so'
+        exclude 'libsteamworks*.so'
+        // LWJGL platform native directories
+        exclude 'windows/**'
+        exclude 'linux/**'
+        exclude 'macos/**'
+        // LWJGL Java classes (desktop-only windowing/GL)
+        exclude 'org/lwjgl/**'
+        // Multi-release LWJGL JAR entries
+        exclude 'META-INF/versions/**'
+        // Steamworks SDK
+        exclude 'com/codedisaster/steamworks/**'
+        exclude 'steam_appid.txt'
+        // Desktop audio codecs (OpenAL/jcraft OGG, javazoom MP3)
+        exclude 'com/jcraft/**'
+        exclude 'javazoom/**'
+        // libgdx classes — provided by gdx-backend-android/robovm transitive deps at build time
+        exclude 'com/badlogic/gdx/**'
+        // Maven metadata — not needed at runtime, avoid packaging conflicts
+        exclude 'META-INF/maven/**'
+        // Non-class bulk that bloats the APK entry count
+        exclude 'modsExamples/**'
+        exclude '*.txt'
+        exclude '*.ser'
+    }
+}
+
+configure(subprojects - project(':android')) {
+    apply plugin: 'java-library'
+    java.sourceCompatibility = 8
+    compileJava.options.incremental = true
+}
+
+subprojects {
+    version = "$projectVersion"
+    ext.appName = 'aoh2de-porter'
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = 'https://jitpack.io' }
+    }
+}

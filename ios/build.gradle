@@ -1,0 +1,35 @@
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    classpath "com.mobidevelop.robovm:robovm-gradle-plugin:$robovmVersion"
+  }
+}
+apply plugin: 'robovm'
+
+[compileJava, compileTestJava]*.options*.encoding = 'UTF-8'
+
+java.targetCompatibility = 8
+java.sourceCompatibility = 8
+
+sourceSets.main.java.srcDirs = ['src/main/java']
+
+ext {
+  mainClassName = "aoc.kingdoms.lukasz.jakowski.IOSLauncher"
+}
+
+launchIPhoneSimulator.dependsOn build
+launchIPadSimulator.dependsOn build
+launchIOSDevice.dependsOn build
+createIPA.dependsOn build
+
+
+dependencies {
+  implementation "com.badlogicgames.gdx:gdx-backend-robovm:$gdxVersion"
+  implementation "com.badlogicgames.gdx:gdx-freetype-platform:$gdxVersion:natives-ios"
+  implementation "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-ios"
+  implementation "com.mobidevelop.robovm:robovm-cocoatouch:$robovmVersion"
+  implementation "com.mobidevelop.robovm:robovm-rt:$robovmVersion"
+  implementation project(':core')
+}

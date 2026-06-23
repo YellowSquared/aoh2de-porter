@@ -5,6 +5,7 @@ buildscript {
     }
     dependencies {
         classpath "com.android.tools.build:gradle:8.9.3"
+        classpath 'aoh2de:patch'
     }
 }
 
@@ -51,6 +52,19 @@ tasks.register('stripGameJar', Zip) {
         exclude 'modsExamples/**'
         exclude '*.txt'
         exclude '*.ser'
+    }
+}
+
+tasks.register('patchGameJar') {
+    group = 'porter'
+    description = 'Applies ASM bytecode patches to the stripped game jar.'
+    dependsOn stripGameJar
+    def inputJar  = stripGameJar.archiveFile
+    def outputJar = layout.buildDirectory.file('patched/game-patched.jar')
+    inputs.file inputJar
+    outputs.file outputJar
+    doLast {
+        MapBGPatcher.patch(inputJar.get().asFile, outputJar.get().asFile)
     }
 }
 

@@ -18,14 +18,19 @@ android {
       aidl.setSrcDirs(['src/main/java'])
       renderscript.setSrcDirs(['src/main/java'])
       res.setSrcDirs(['res'])
-      assets.setSrcDirs([project.findProperty('debugAssets') == 'true' ? '../assets_debug' : '../assets'])
       jniLibs.setSrcDirs(['libs'])
+    }
+    debug {
+      assets.setSrcDirs(['../assets_debug'])
+    }
+    release {
+      assets.setSrcDirs(['../assets'])
     }
   }
   packagingOptions {
 		resources {
 			excludes += ['META-INF/robovm/ios/robovm.xml', 'META-INF/DEPENDENCIES.txt', 'META-INF/DEPENDENCIES',
-                   'META-INF/dependencies.txt', '**/*.gwt.xml']
+                   'META-INF/dependencies.txt', '**/*.gwt.xml', '**/*.rl']
 			pickFirsts += ['META-INF/LICENSE.txt', 'META-INF/LICENSE', 'META-INF/license.txt', 'META-INF/LGPL2.1',
                      'META-INF/NOTICE.txt', 'META-INF/NOTICE', 'META-INF/notice.txt']
 		}

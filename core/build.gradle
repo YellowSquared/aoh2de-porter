@@ -1,13 +1,13 @@
 [compileJava, compileTestJava]*.options*.encoding = 'UTF-8'
 
-def stripTask = rootProject.tasks.named('stripGameJar')
+def patchTask = rootProject.tasks.named('patchGameJar')
 
 dependencies {
     api "com.badlogicgames.gdx:gdx-freetype:$gdxVersion"
     api "com.badlogicgames.gdx:gdx:$gdxVersion"
-    // Exposes the stripped game jar to consumers via both apiElements (compile) and
-    // runtimeElements (runtime/dex) — no jar repacking needed.
-    api files(stripTask.flatMap { it.archiveFile })
+    // Exposes the ASM-patched game jar to consumers. patchGameJar runs after stripGameJar
+    // and surgically fixes MapBG.updateMinimapResolution without touching mod changes.
+    api files(rootProject.layout.buildDirectory.file('patched/game-patched.jar')).builtBy(patchTask)
 }
 
 jar {

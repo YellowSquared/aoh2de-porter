@@ -2,6 +2,7 @@
 .gradle/
 build/
 **/build/
+patch/.gradle/
 
 ## Android generated natives (copied by copyAndroidNatives task)
 /android/libs/armeabi-v7a/

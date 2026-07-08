@@ -49,10 +49,27 @@ android {
     coreLibraryDesugaringEnabled = true
   }
   buildTypes {
-    release {
-      minifyEnabled true
-      proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), 'proguard-rules.pro'
+    debug {
+      minifyEnabled false
+      // Debug builds usually have this false by default,
+      // but setting it explicitly ensures no shrinking occurs.
     }
+    release {
+      // Disable R8/Code minification
+      minifyEnabled false
+      // Disable Resource shrinking
+      //noinspection NotShrinkingResources
+      shrinkResources false
+
+      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+    }
+  }
+
+  aaptOptions {
+    // Disables compression for these file types in both Debug and Release.
+    // Adding an empty string (noCompress '') would disable it for all files,
+    // but it is recommended to list specific extensions used in your project.
+    noCompress 'zip', 'png', 'jpg', 'jpeg', 'ogg', 'json', 'atlas', 'fnt'
   }
 }
 

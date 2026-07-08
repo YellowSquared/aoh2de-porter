@@ -56,16 +56,18 @@ tasks.register('stripGameJar', Zip) {
 }
 
 tasks.register('patchGameJar') {
-    group = 'porter'
-    description = 'Applies ASM bytecode patches to the stripped game jar.'
-    dependsOn stripGameJar
-    def inputJar  = stripGameJar.archiveFile
-    def outputJar = layout.buildDirectory.file('patched/game-patched.jar')
-    inputs.file inputJar
-    outputs.file outputJar
-    doLast {
-        MapBGPatcher.patch(inputJar.get().asFile, outputJar.get().asFile)
-    }
+  group = 'porter'
+  description = 'Applies ASM bytecode patches to the stripped game jar.'
+  dependsOn stripGameJar
+  def inputJar  = stripGameJar.archiveFile
+  def intermediateJar = layout.buildDirectory.file('patched/game-mapbg-patched.jar')
+  def outputJar = layout.buildDirectory.file('patched/game-patched.jar')
+  inputs.file inputJar
+  outputs.file outputJar
+  doLast {
+    MapBGPatcher.patch(inputJar.get().asFile, intermediateJar.get().asFile)
+    FileLimitPatcher.patch(intermediateJar.get().asFile, outputJar.get().asFile)
+  }
 }
 
 configure(subprojects - project(':android')) {

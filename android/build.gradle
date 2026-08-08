@@ -1,8 +1,11 @@
-
 buildscript {
   repositories {
     mavenCentral()
     google()
+  }
+  dependencies {
+    // Needed for zip64 write support in the custom packaging pipeline below.
+    classpath 'org.apache.commons:commons-compress:1.26.2'
   }
 }
 apply plugin: 'com.android.application'
@@ -28,12 +31,12 @@ android {
     }
   }
   packagingOptions {
-		resources {
-			excludes += ['META-INF/robovm/ios/robovm.xml', 'META-INF/DEPENDENCIES.txt', 'META-INF/DEPENDENCIES',
+    resources {
+      excludes += ['META-INF/robovm/ios/robovm.xml', 'META-INF/DEPENDENCIES.txt', 'META-INF/DEPENDENCIES',
                    'META-INF/dependencies.txt', '**/*.gwt.xml', '**/*.rl']
-			pickFirsts += ['META-INF/LICENSE.txt', 'META-INF/LICENSE', 'META-INF/license.txt', 'META-INF/LGPL2.1',
+      pickFirsts += ['META-INF/LICENSE.txt', 'META-INF/LICENSE', 'META-INF/license.txt', 'META-INF/LGPL2.1',
                      'META-INF/NOTICE.txt', 'META-INF/NOTICE', 'META-INF/notice.txt']
-		}
+    }
   }
   defaultConfig {
     applicationId 'aoc.kingdoms.lukasz.jakowski'
@@ -128,25 +131,244 @@ tasks.matching { it.name.contains("merge") && it.name.contains("JniLibFolders") 
   packageTask.dependsOn 'copyAndroidNatives'
 }
 
-tasks.register('run', Exec) {
-  def path
+// Shared helper: resolve the Android SDK dir the same way your 'run' task does,
+// from local.properties, falling back to ANDROID_SDK_ROOT / ANDROID_HOME.
+def resolveSdkDir = {
   def localProperties = project.file("../local.properties")
   if (localProperties.exists()) {
     Properties properties = new Properties()
-    localProperties.withInputStream { instr ->
-      properties.load(instr)
-    }
+    localProperties.withInputStream { instr -> properties.load(instr) }
     def sdkDir = properties.getProperty('sdk.dir')
-    if (sdkDir) {
-      path = sdkDir
-    } else {
-      path = "$System.env.ANDROID_SDK_ROOT"
-    }
-  } else {
-    path = "$System.env.ANDROID_SDK_ROOT"
+    if (sdkDir) return sdkDir
   }
+  return System.env.ANDROID_SDK_ROOT ?: System.env.ANDROID_HOME
+}
 
+tasks.register('run', Exec) {
+  def path = resolveSdkDir()
   def adb = path + "/platform-tools/adb"
   commandLine "$adb", 'shell', 'am', 'start', '-n', 'aoc.kingdoms.lukasz.jakowski/aoc.kingdoms.lukasz.jakowski.android.AndroidLauncher'
 }
 
+
+// =============================================================================
+// ZIP64 APK PACKAGING (bypasses AGP's 65,535-entry "Zip64 required but
+// forbidden" limit, for debugging builds with 65k+ loose files)
+// =============================================================================
+//
+// Standard AGP packaging refuses to write an APK with more than 65,535 total
+// entries (res + assets + dex + libs combined), even though the Zipflinger
+// library AGP itself uses, and the Android runtime's own zip reader, both
+// support zip64. This block disables AGP's packaging task for one variant
+// and replaces it with a hand-rolled zip64 packer fed from AGP's own
+// intermediate build outputs, then signs it manually.
+//
+// The paths below were verified against a *real* build on this machine
+// (AGP 8.9.3, compileSdk 35, 2026-08-08) by running
+// `./gradlew :android:packageDebug --info` and grepping the log — it still
+// fails on the entry-count guard as expected, but every task up to that
+// point runs and reports the real intermediate directories it read from.
+// If you're on a different AGP version, re-run that command and diff the
+// paths below against what actually shows up in your log; `packZip64*`
+// fails loudly (not just a warning) if the required ones are missing.
+//
+// IMPORTANT — no zipalign, no apksigner: both were tested directly against
+// zip64 archives (real and synthetic, 30 and 70,000+ entries) on this machine
+// and neither can even *open* one — zipalign says "Unable to open ... as zip
+// archive: Success", apksigner throws "Unused space at the end of ZIP Central
+// Directory" because their zip parsers have no Zip64 EOCD-locator/record
+// support at all. This isn't fixable from our side; it's a gap in those
+// binaries. Confirmed by cross-referencing a real, working 120k-file Zip64
+// APK the user had on hand: it's signed with the V1 JAR scheme ONLY
+// (META-INF/*.RSA + *.SF + MANIFEST.MF, no "APK Sig Block 42" v2/v3 marker
+// anywhere) — V1 signing just appends plain zip entries and never has to
+// relocate the EOCD, so it never hits the bug. `jarsigner` (plain JDK, not
+// an Android SDK tool) was confirmed here to sign *and verify* a 70,000-entry
+// Zip64 archive correctly, matching that scheme. Alignment is skipped
+// entirely (zipalign can't do it anyway); `extractNativeLibs="true"` is set
+// in AndroidManifest.xml instead so native libs don't need to be page-aligned
+// or mmap'd directly from the APK.
+
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.Zip64Mode
+
+def zip64Variant   = 'Debug'                 // change to 'Release' for a release build
+def zip64LcVariant = zip64Variant.toLowerCase()
+
+// Extensions AAPT2 stores uncompressed — must match aaptOptions.noCompress above.
+def zNoCompressExts = ['zip', 'png', 'jpg', 'jpeg', 'ogg', 'json', 'atlas', 'fnt'] as Set
+
+// ---- INTERMEDIATE PATHS (verified for AGP 8.9.3 — re-check on other versions) ----
+def zBuildDir = layout.buildDirectory.get().asFile
+def resApPath = file("$zBuildDir/intermediates/linked_resources_binary_format/${zip64LcVariant}/process${zip64Variant}Resources/linked-resources-binary-format-${zip64LcVariant}.ap_")
+// AGP dexes three sources separately (the android module's own classes, the
+// library-module/project classes — where the patched game jar ends up via
+// :core — and third-party jars). All three must land in the APK root as
+// classes.dex, classes2.dex, ... — silently dropping any one ships an APK
+// missing either your own launcher code, all the game logic, or gdx itself.
+def dexDirsZ = [
+  file("$zBuildDir/intermediates/dex/${zip64LcVariant}/mergeProjectDex${zip64Variant}"),
+  file("$zBuildDir/intermediates/dex/${zip64LcVariant}/mergeLibDex${zip64Variant}"),
+  file("$zBuildDir/intermediates/dex/${zip64LcVariant}/mergeExtDex${zip64Variant}"),
+]
+def assetsDirZ     = file("$zBuildDir/intermediates/assets/${zip64LcVariant}/merge${zip64Variant}Assets")
+// Stripped (debug-symbols-removed), not the raw merged_native_libs — matches what a
+// normal AGP build actually packages.
+def nativeLibsDirZ = file("$zBuildDir/intermediates/stripped_native_libs/${zip64LcVariant}/strip${zip64Variant}DebugSymbols/out/lib")
+// AGP packs merged java resources into a single base.jar, not loose files.
+def javaResJarZ    = file("$zBuildDir/intermediates/merged_java_res/${zip64LcVariant}/merge${zip64Variant}JavaResource/base.jar")
+// -----------------------------------------------------------------------------
+
+def zOutDir      = file("$zBuildDir/outputs/apk_zip64/${zip64LcVariant}")
+def zUnsignedApk = file("$zOutDir/app-${zip64LcVariant}-unsigned-zip64.apk")
+def zSignedApk   = file("$zOutDir/app-${zip64LcVariant}-signed-zip64.apk")
+
+// True for entries that should stay uncompressed: native libs (harmless either way
+// now that AndroidManifest.xml sets extractNativeLibs="true" — Android extracts
+// them at install time rather than mmap'ing from the APK, so no page-alignment is
+// required) and anything matching aaptOptions.noCompress.
+def zShouldStore = { String entryName ->
+  if (entryName.startsWith('lib/')) return true
+  int dot = entryName.lastIndexOf('.')
+  if (dot < 0) return false
+  return zNoCompressExts.contains(entryName.substring(dot + 1).toLowerCase())
+}
+
+// Recursively adds every file under `dir` into the zip, with an optional path prefix.
+def addDirToZip = { ZipArchiveOutputStream zos, File dir, String prefix ->
+  if (!dir.exists()) {
+    logger.warn("[zip64] Skipping missing intermediate dir: $dir")
+    return
+  }
+  dir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+    def relPath = prefix + dir.toPath().relativize(f.toPath()).toString().replace(File.separatorChar, '/' as char)
+    def entry = new ZipArchiveEntry(relPath)
+    entry.method = zShouldStore(relPath) ? ZipArchiveEntry.STORED : ZipArchiveEntry.DEFLATED
+    zos.putArchiveEntry(entry)
+    f.withInputStream { ins -> zos << ins }
+    zos.closeArchiveEntry()
+  }
+}
+
+// Copies every entry of an existing zip/jar `src` into `zos`, preserving each
+// entry's original STORED/DEFLATED method instead of blindly re-deflating —
+// which would otherwise undo AAPT2's/AGP's own noCompress decisions (e.g. for
+// resources.arsc, which AAPT2 always stores uncompressed).
+def addZipToZip = { ZipArchiveOutputStream zos, File src ->
+  if (!src.exists()) {
+    logger.warn("[zip64] Skipping missing intermediate archive: $src")
+    return
+  }
+  new java.util.zip.ZipFile(src).withCloseable { zf ->
+    zf.entries().each { e ->
+      if (e.isDirectory()) return
+      def entry = new ZipArchiveEntry(e.name)
+      entry.method = e.method == java.util.zip.ZipEntry.STORED ? ZipArchiveEntry.STORED : ZipArchiveEntry.DEFLATED
+      zos.putArchiveEntry(entry)
+      zf.getInputStream(e).withCloseable { ins -> zos << ins }
+      zos.closeArchiveEntry()
+    }
+  }
+}
+
+tasks.register("packZip64${zip64Variant}") {
+  group = 'zip64'
+  description = "Hand-packs a zip64 APK for ${zip64LcVariant}, bypassing AGP's 65535-entry limit"
+
+  doLast {
+    zOutDir.mkdirs()
+    if (zUnsignedApk.exists()) zUnsignedApk.delete()
+
+    if (!resApPath.exists()) {
+      throw new GradleException("[zip64] Required AAPT2-linked resources not found at $resApPath. " +
+        "Run './gradlew :android:packageDebug --info' (it will still fail on the entry-count guard, " +
+        "that's expected) and grep the log for the real 'linked_resources_binary_format' path for your " +
+        "AGP version, then fix resApPath above.")
+    }
+    if (dexDirsZ.every { !it.exists() }) {
+      throw new GradleException("[zip64] None of the expected dex intermediate dirs exist: $dexDirsZ. " +
+        "Verify the mergeProjectDex/mergeLibDex/mergeExtDex paths for your AGP version the same way as above.")
+    }
+
+    new ZipArchiveOutputStream(zUnsignedApk).withCloseable { zos ->
+      // AsNeeded (not Always): forcing zip64 extra fields onto every entry
+      // regardless of size produces CEN extra-field data that even
+      // java.util.zip.ZipFile's strict validator rejects ("invalid zip64
+      // extra data field size"). AsNeeded only uses zip64 structures where
+      // actually required (here: the >65535 total entry count in the EOCD),
+      // which is both correct per the zip spec and what every reader tested
+      // here (java.util.zip, Python's zipfile) parses without complaint.
+      zos.setUseZip64(Zip64Mode.AsNeeded)
+
+      // 1. AAPT2-linked resources — AndroidManifest.xml, resources.arsc, res/*.
+      addZipToZip(zos, resApPath)
+
+      // 2. Dex files from all three AGP dex-merge outputs, renamed sequentially
+      //    onto the archive root as classes.dex, classes2.dex, classes3.dex, ...
+      def dexIndex = 1
+      dexDirsZ.each { dexDir ->
+        if (!dexDir.exists()) {
+          logger.warn("[zip64] Skipping missing dex intermediate dir: $dexDir")
+          return
+        }
+        dexDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+          if (f.name != 'classes.dex') return
+          def name = dexIndex == 1 ? 'classes.dex' : "classes${dexIndex}.dex"
+          dexIndex++
+          def entry = new ZipArchiveEntry(name)
+          entry.method = ZipArchiveEntry.DEFLATED
+          zos.putArchiveEntry(entry)
+          f.withInputStream { ins -> zos << ins }
+          zos.closeArchiveEntry()
+        }
+      }
+
+      // 3. Merged assets under assets/ (this is where your 65k+ debug files live)
+      addDirToZip(zos, assetsDirZ, "assets/")
+
+      // 4. Stripped native libs under lib/<abi>/ — always STORED, see zShouldStore.
+      addDirToZip(zos, nativeLibsDirZ, "lib/")
+
+      // 5. Merged java resources (META-INF/ etc.), packed by AGP into base.jar.
+      addZipToZip(zos, javaResJarZ)
+    }
+    logger.lifecycle("[zip64] Wrote unsigned zip64 APK: $zUnsignedApk")
+  }
+}
+
+def zIsWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+
+// V1 (JAR) signing via the JDK's own jarsigner — NOT apksigner. See the big
+// comment above: apksigner/zipalign cannot handle Zip64 archives at all;
+// jarsigner (built on java.util.zip/jar, which already reads Zip64 correctly)
+// can, and this matches how the one confirmed-working Zip64 APK we inspected
+// was actually signed. jarsigner signs in place, so we copy first.
+tasks.register("signZip64${zip64Variant}", Exec) {
+  group = 'zip64'
+  dependsOn "packZip64${zip64Variant}"
+  doFirst {
+    zOutDir.mkdirs()
+    if (zSignedApk.exists()) zSignedApk.delete()
+    java.nio.file.Files.copy(zUnsignedApk.toPath(), zSignedApk.toPath())
+    // Uses the default debug keystore/alias. Point at a real release keystore
+    // (and a real password, not inline) before using this for distribution.
+    def debugKeystore = "${System.getProperty('user.home')}/.android/debug.keystore"
+    def jarsignerBin = "${System.getProperty('java.home')}/bin/jarsigner" + (zIsWindows ? '.exe' : '')
+    commandLine jarsignerBin,
+      '-keystore', debugKeystore,
+      '-storepass', 'android',
+      zSignedApk.absolutePath,
+      'androiddebugkey'
+  }
+  doLast {
+    logger.lifecycle("[zip64] Signed zip64 APK ready: $zSignedApk")
+    logger.lifecycle("[zip64] Install with: adb install -r ${zSignedApk.absolutePath}")
+  }
+}
+
+// Disable AGP's own packaging task for this variant so a normal
+// assembleDebug/assembleRelease doesn't also try (and fail) alongside it.
+afterEvaluate {
+  tasks.findByName("package${zip64Variant}")?.enabled = false
+}

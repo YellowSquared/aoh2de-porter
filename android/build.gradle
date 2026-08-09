@@ -31,15 +31,6 @@ android {
       jniLibs.setSrcDirs(['libs'])
     }
     debug {
-      // Was '../assets_debug' (108,839 files). That pushed the APK over 65,535 zip
-      // entries, which forces zip64, which rules out apksigner/v2 and leaves V1 JAR
-      // signing as the only option — and a 108k-section, 12 MB MANIFEST.MF OOMs
-      // com.miui.packageinstaller (256 MB app heap) while it calls
-      // getPackageArchiveInfo, so the install dialog dies silently on the device.
-      // Anything landing here at 65,536+ entries brings all of that straight back.
-      // Keeping 100k+ asset files therefore needs them to stop being one zip entry
-      // each — packed into bundles under assets/, or moved out of the APK and read
-      // from the app's external files dir. Which of those we do is still undecided.
       assets.setSrcDirs(['../assets'])
     }
     release {

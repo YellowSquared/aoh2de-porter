@@ -25,7 +25,15 @@
             android:windowSoftInputMode="stateHidden|adjustPan"
             android:resizeableActivity="false"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|fontScale"
-            android:exported="false">
+            android:exported="true">
+            <!-- The launcher entry point lived on SplashActivity until 502ba74 removed that
+                 class along with the ASM-patch approach; without this the package installs
+                 but has no launchable activity ("No activities found to run"). An activity
+                 with an intent-filter must be exported="true" on API 31+. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
         </activity>
     </application>
 </manifest>

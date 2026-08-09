@@ -6,6 +6,13 @@ buildscript {
   dependencies {
     // Needed for zip64 write support in the custom packaging pipeline below.
     classpath 'org.apache.commons:commons-compress:1.26.2'
+    // Used to hand-roll a V1 JAR (PKCS#7) signature ourselves instead of shelling out to
+    // jarsigner, which fully rewrites the zip via java.util.zip and silently converts it to
+    // a data-descriptor-style archive with no per-entry zip64 extra fields — confirmed on a
+    // real device to make the resulting APK unparseable, unlike our own Commons Compress
+    // output. See the big comment on the zip64 packaging block below.
+    classpath 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+    classpath 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
   }
 }
 apply plugin: 'com.android.application'
@@ -24,7 +31,16 @@ android {
       jniLibs.setSrcDirs(['libs'])
     }
     debug {
-      assets.setSrcDirs(['../assets_debug'])
+      // Was '../assets_debug' (108,839 files). That pushed the APK over 65,535 zip
+      // entries, which forces zip64, which rules out apksigner/v2 and leaves V1 JAR
+      // signing as the only option — and a 108k-section, 12 MB MANIFEST.MF OOMs
+      // com.miui.packageinstaller (256 MB app heap) while it calls
+      // getPackageArchiveInfo, so the install dialog dies silently on the device.
+      // Anything landing here at 65,536+ entries brings all of that straight back.
+      // Keeping 100k+ asset files therefore needs them to stop being one zip entry
+      // each — packed into bundles under assets/, or moved out of the APK and read
+      // from the app's external files dir. Which of those we do is still undecided.
+      assets.setSrcDirs(['../assets'])
     }
     release {
       assets.setSrcDirs(['../assets'])
@@ -41,7 +57,23 @@ android {
   defaultConfig {
     applicationId 'aoc.kingdoms.lukasz.jakowski'
     minSdkVersion 21
-    targetSdkVersion 35
+    // Pinned below 30 on purpose, and load-bearing. Raising this to 35 was tested
+    // directly against an API 36 emulator (2026-08-08) and the install fails:
+    //
+    //   -124: Targeting R+ (version 30 and above) requires the resources.arsc of
+    //   installed APKs to be stored uncompressed and aligned on a 4-byte boundary
+    //
+    // targetSdk >= 30 adds two requirements this pipeline cannot currently satisfy:
+    //   1. resources.arsc must be 4-byte aligned. It is already STORED, but nothing
+    //      aligns it — that is zipalign's job and zipalign cannot read zip64 at all.
+    //      Fixable here by padding the entry's extra field in packZip64 so the data
+    //      offset lands on a 4-byte boundary.
+    //   2. the APK must carry an APK Signature Scheme v2+ signature. We can only
+    //      produce a V1 JAR signature, since apksigner also cannot read zip64.
+    //      This is the harder one and is not implemented.
+    // Only #1 surfaces above, because parsing aborts before signature verification.
+    // Sideloading at 28 works; Play distribution needs 35 and therefore both fixes.
+    targetSdkVersion 28
     versionCode 1
     versionName "1.0"
     multiDexEnabled true
@@ -178,20 +210,43 @@ tasks.register('run', Exec) {
 // archive: Success", apksigner throws "Unused space at the end of ZIP Central
 // Directory" because their zip parsers have no Zip64 EOCD-locator/record
 // support at all. This isn't fixable from our side; it's a gap in those
-// binaries. Confirmed by cross-referencing a real, working 120k-file Zip64
+// binaries. Confirmed by cross-referencing a real, working 108k-file Zip64
 // APK the user had on hand: it's signed with the V1 JAR scheme ONLY
 // (META-INF/*.RSA + *.SF + MANIFEST.MF, no "APK Sig Block 42" v2/v3 marker
 // anywhere) — V1 signing just appends plain zip entries and never has to
-// relocate the EOCD, so it never hits the bug. `jarsigner` (plain JDK, not
-// an Android SDK tool) was confirmed here to sign *and verify* a 70,000-entry
-// Zip64 archive correctly, matching that scheme. Alignment is skipped
-// entirely (zipalign can't do it anyway); `extractNativeLibs="true"` is set
-// in AndroidManifest.xml instead so native libs don't need to be page-aligned
-// or mmap'd directly from the APK.
+// relocate the EOCD, so it never hits the bug.
+//
+// IMPORTANT #2 — no jarsigner either: the obvious next move (JDK's own
+// jarsigner, since it reads Zip64 fine) was tried and *also* fails on a real
+// device with "PackageInfo is null" on install, even though it signs and
+// verifies cleanly on desktop. Cause, confirmed by diffing our output against
+// the reference APK byte-for-byte: jarsigner fully rewrites the archive via
+// java.util.zip.JarOutputStream to add its 3 signature entries, which (a)
+// switches every DEFLATED entry to data-descriptor mode (general-purpose flag
+// bit 3 set) and (b) drops the per-entry Zip64 extra fields the reference
+// APK's writer puts on nearly every entry — our own pre-jarsigner Commons
+// Compress output has neither problem. So V1 signing is hand-rolled below
+// (manifest digesting + PKCS#7 via Bouncy Castle) and appended directly onto
+// our own archive in one pass, never handing the whole 2GB file to a zip
+// writer we don't control. Alignment is skipped entirely (zipalign can't do
+// it anyway); `extractNativeLibs="true"` is set in AndroidManifest.xml
+// instead so native libs don't need to be page-aligned or mmap'd directly
+// from the APK.
 
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.Zip64Mode
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.Security
+import java.util.Base64
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.cms.CMSProcessableByteArray
+import org.bouncycastle.cms.CMSSignedDataGenerator
+import org.bouncycastle.cms.jcajce.JcaSignerInfoGeneratorBuilder
+import org.bouncycastle.cert.jcajce.JcaCertStore
+import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 
 def zip64Variant   = 'Debug'                 // change to 'Release' for a release build
 def zip64LcVariant = zip64Variant.toLowerCase()
@@ -207,10 +262,18 @@ def resApPath = file("$zBuildDir/intermediates/linked_resources_binary_format/${
 // :core — and third-party jars). All three must land in the APK root as
 // classes.dex, classes2.dex, ... — silently dropping any one ships an APK
 // missing either your own launcher code, all the game logic, or gdx itself.
+// A fourth source is easy to miss: with coreLibraryDesugaringEnabled, D8 rewrites
+// java.time/java.util.stream/etc. call sites to the j$.* namespace, and L8 emits the
+// backing j$.* classes into their own dex here — NOT into any of the merge outputs
+// above. Omitting it produces an APK that installs and launches fine and then dies
+// at runtime with "NoClassDefFoundError: Failed resolution of: Lj$/time/LocalDate;"
+// the moment desugared API is touched. Note its dex is named classes1000.dex, so the
+// packing loop must not filter on the literal name "classes.dex".
 def dexDirsZ = [
   file("$zBuildDir/intermediates/dex/${zip64LcVariant}/mergeProjectDex${zip64Variant}"),
   file("$zBuildDir/intermediates/dex/${zip64LcVariant}/mergeLibDex${zip64Variant}"),
   file("$zBuildDir/intermediates/dex/${zip64LcVariant}/mergeExtDex${zip64Variant}"),
+  file("$zBuildDir/intermediates/desugar_lib_dex/${zip64LcVariant}/l8DexDesugarLib${zip64Variant}"),
 ]
 def assetsDirZ     = file("$zBuildDir/intermediates/assets/${zip64LcVariant}/merge${zip64Variant}Assets")
 // Stripped (debug-symbols-removed), not the raw merged_native_libs — matches what a
@@ -276,6 +339,16 @@ tasks.register("packZip64${zip64Variant}") {
   group = 'zip64'
   description = "Hand-packs a zip64 APK for ${zip64LcVariant}, bypassing AGP's 65535-entry limit"
 
+  // This task reads AGP's intermediate outputs directly by path rather than declaring
+  // them as Gradle task inputs, so without explicit dependsOn here Gradle has no way to
+  // know it needs to (re)run these first — e.g. editing assets_debug/ alone would NOT
+  // trigger a rebuild of this task's output, silently packing stale/empty intermediates.
+  dependsOn "process${zip64Variant}Resources", "merge${zip64Variant}Assets",
+    "mergeProjectDex${zip64Variant}", "mergeLibDex${zip64Variant}", "mergeExtDex${zip64Variant}",
+    "l8DexDesugarLib${zip64Variant}",
+    "strip${zip64Variant}DebugSymbols", "merge${zip64Variant}JavaResource"
+  outputs.upToDateWhen { false } // always re-pack; the inputs above are directories we don't track precisely
+
   doLast {
     zOutDir.mkdirs()
     if (zUnsignedApk.exists()) zUnsignedApk.delete()
@@ -313,7 +386,10 @@ tasks.register("packZip64${zip64Variant}") {
           return
         }
         dexDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
-          if (f.name != 'classes.dex') return
+          // "classes.dex" from the merge outputs (multidex arrives as several such files
+          // in sibling subdirectories) plus L8's "classes1000.dex" — all get renumbered
+          // sequentially below, so the source name only needs to identify a dex.
+          if (!(f.name ==~ /classes\d*\.dex/)) return
           def name = dexIndex == 1 ? 'classes.dex' : "classes${dexIndex}.dex"
           dexIndex++
           def entry = new ZipArchiveEntry(name)
@@ -337,31 +413,147 @@ tasks.register("packZip64${zip64Variant}") {
   }
 }
 
-def zIsWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+// Hand-rolled V1 JAR (PKCS#7) signing — see IMPORTANT #2 above for why not
+// jarsigner. Reads the unsigned archive with java.util.zip.ZipFile (confirmed
+// zip64-safe) and re-writes it entry-by-entry with Commons Compress (same
+// writer packZip64Debug uses, so the same clean, non-data-descriptor,
+// zip64-AsNeeded conventions apply), computing a SHA-256 digest of each
+// entry's raw bytes as it goes, then appends META-INF/MANIFEST.MF, <alias>.SF
+// and <alias>.RSA as three final entries — never handing the archive to a
+// zip writer we don't control.
+//
+// JAR manifest format reminder (see JDK's jar spec): no line in
+// MANIFEST.MF/.SF may exceed 72 bytes in UTF-8; longer values continue on
+// following lines that start with exactly one space.
+//
+// This MUST wrap in the byte domain and never round-trip a chunk back through
+// String. A multi-byte UTF-8 character can straddle the 72-byte boundary, and
+// decoding the two halves separately turns each into U+FFFD, silently
+// corrupting the entry name. Readers (including Android's StrictJarManifest)
+// rejoin the raw continuation bytes *before* decoding UTF-8, so splitting a
+// character across lines is legal as long as the bytes survive untouched.
+//
+// This bit for real: the earlier String-based version corrupted 9 of the 321
+// non-ASCII asset names (purely by where they landed relative to byte 72), and
+// Android rejected the whole 108k-entry APK at install time with
+// INSTALL_PARSE_FAILED_NO_CERTIFICATES / "File <name> in manifest does not
+// exist". Renaming any asset moves the boundary and changes which files break.
+def zCRLF = "\r\n".getBytes('UTF-8')
+def zJoinBytes = { List parts ->
+  def out = new ByteArrayOutputStream()
+  parts.each { byte[] p -> out.write(p, 0, p.length) }
+  return out.toByteArray()
+}
+def zWrapManifestLine = { String line ->
+  byte[] bytes = line.getBytes('UTF-8')
+  def out = new ByteArrayOutputStream()
+  int i = 0
+  boolean first = true
+  while (i < bytes.length) {
+    // 72 bytes total per line; continuation lines spend one of those on the leading space.
+    int chunkLen = Math.min(first ? 72 : 71, bytes.length - i)
+    if (!first) out.write(0x20)
+    out.write(bytes, i, chunkLen)
+    out.write(zCRLF, 0, zCRLF.length)
+    i += chunkLen
+    first = false
+  }
+  return out.toByteArray()
+}
 
-// V1 (JAR) signing via the JDK's own jarsigner — NOT apksigner. See the big
-// comment above: apksigner/zipalign cannot handle Zip64 archives at all;
-// jarsigner (built on java.util.zip/jar, which already reads Zip64 correctly)
-// can, and this matches how the one confirmed-working Zip64 APK we inspected
-// was actually signed. jarsigner signs in place, so we copy first.
-tasks.register("signZip64${zip64Variant}", Exec) {
+tasks.register("signZip64${zip64Variant}") {
   group = 'zip64'
+  description = "Hand-signs the zip64 APK with a V1 JAR (PKCS#7) signature, appended in-place via Commons Compress"
   dependsOn "packZip64${zip64Variant}"
-  doFirst {
+
+  doLast {
     zOutDir.mkdirs()
     if (zSignedApk.exists()) zSignedApk.delete()
-    java.nio.file.Files.copy(zUnsignedApk.toPath(), zSignedApk.toPath())
-    // Uses the default debug keystore/alias. Point at a real release keystore
-    // (and a real password, not inline) before using this for distribution.
+
+    Security.addProvider(new BouncyCastleProvider())
+
+    // Default debug keystore/alias. Point at a real release keystore (and a
+    // real password, not inline) before using this for distribution.
     def debugKeystore = "${System.getProperty('user.home')}/.android/debug.keystore"
-    def jarsignerBin = "${System.getProperty('java.home')}/bin/jarsigner" + (zIsWindows ? '.exe' : '')
-    commandLine jarsignerBin,
-      '-keystore', debugKeystore,
-      '-storepass', 'android',
-      zSignedApk.absolutePath,
-      'androiddebugkey'
-  }
-  doLast {
+    def alias = 'androiddebugkey'
+    def ks = KeyStore.getInstance('JKS')
+    new File(debugKeystore).withInputStream { ins -> ks.load(ins, 'android'.toCharArray()) }
+    def privateKey = (java.security.PrivateKey) ks.getKey(alias, 'android'.toCharArray())
+    def cert = (java.security.cert.X509Certificate) ks.getCertificate(alias)
+    // 8-char DOS-style signature file basename, matching what jarsigner/the reference APK use.
+    def sigBaseName = alias.toUpperCase(Locale.ROOT).take(8)
+
+    def entryNames = []
+    def manifestSections = [:] // name -> raw bytes of "Name: ...\r\nSHA-256-Digest: ...\r\n\r\n"
+
+    new ZipArchiveOutputStream(zSignedApk).withCloseable { zos ->
+      zos.setUseZip64(Zip64Mode.AsNeeded)
+
+      new java.util.zip.ZipFile(zUnsignedApk).withCloseable { zf ->
+        zf.entries().each { e ->
+          if (e.isDirectory()) return
+          def entry = new ZipArchiveEntry(e.name)
+          entry.method = e.method == java.util.zip.ZipEntry.STORED ? ZipArchiveEntry.STORED : ZipArchiveEntry.DEFLATED
+          zos.putArchiveEntry(entry)
+          def digest = MessageDigest.getInstance('SHA-256')
+          zf.getInputStream(e).withCloseable { ins ->
+            byte[] buf = new byte[65536]
+            int n
+            while ((n = ins.read(buf)) != -1) {
+              digest.update(buf, 0, n)
+              zos.write(buf, 0, n)
+            }
+          }
+          zos.closeArchiveEntry()
+          entryNames << e.name
+          manifestSections[e.name] = zJoinBytes([
+            zWrapManifestLine("Name: ${e.name}"),
+            zWrapManifestLine("SHA-256-Digest: ${Base64.encoder.encodeToString(digest.digest())}"),
+            zCRLF
+          ])
+        }
+      }
+
+      byte[] manifestBytes = zJoinBytes(
+        [zWrapManifestLine('Manifest-Version: 1.0'), zCRLF] +
+          entryNames.collect { manifestSections[it] })
+
+      byte[] manifestDigest = MessageDigest.getInstance('SHA-256').digest(manifestBytes)
+      byte[] sfEntries = zJoinBytes(entryNames.collect { name ->
+        byte[] sectionDigest = MessageDigest.getInstance('SHA-256').digest(manifestSections[name])
+        zJoinBytes([
+          zWrapManifestLine("Name: ${name}"),
+          zWrapManifestLine("SHA-256-Digest: ${Base64.encoder.encodeToString(sectionDigest)}"),
+          zCRLF
+        ])
+      })
+      byte[] sfBytes = zJoinBytes([
+        zWrapManifestLine('Signature-Version: 1.0'),
+        zWrapManifestLine("SHA-256-Digest-Manifest: ${Base64.encoder.encodeToString(manifestDigest)}"),
+        zCRLF,
+        sfEntries
+      ])
+
+      // Detached PKCS#7 SignedData over the .SF bytes — standard JAR/APK V1 signature format.
+      def certStore = new JcaCertStore([cert])
+      def gen = new CMSSignedDataGenerator()
+      def contentSigner = new JcaContentSignerBuilder('SHA256withRSA').setProvider('BC').build(privateKey)
+      def digestCalcProvider = new JcaDigestCalculatorProviderBuilder().setProvider('BC').build()
+      gen.addSignerInfoGenerator(new JcaSignerInfoGeneratorBuilder(digestCalcProvider).build(contentSigner, cert))
+      gen.addCertificates(certStore)
+      byte[] rsaBytes = gen.generate(new CMSProcessableByteArray(sfBytes), false).getEncoded()
+
+      def writeSimpleEntry = { String name, byte[] data ->
+        def entry = new ZipArchiveEntry(name)
+        entry.method = ZipArchiveEntry.DEFLATED
+        zos.putArchiveEntry(entry)
+        zos.write(data)
+        zos.closeArchiveEntry()
+      }
+      writeSimpleEntry('META-INF/MANIFEST.MF', manifestBytes)
+      writeSimpleEntry("META-INF/${sigBaseName}.SF", sfBytes)
+      writeSimpleEntry("META-INF/${sigBaseName}.RSA", rsaBytes)
+    }
     logger.lifecycle("[zip64] Signed zip64 APK ready: $zSignedApk")
     logger.lifecycle("[zip64] Install with: adb install -r ${zSignedApk.absolutePath}")
   }

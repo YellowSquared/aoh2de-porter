@@ -77,13 +77,9 @@ android {
   buildTypes {
     debug {
       minifyEnabled false
-      // Debug builds usually have this false by default,
-      // but setting it explicitly ensures no shrinking occurs.
     }
     release {
-      // Disable R8/Code minification
       minifyEnabled false
-      // Disable Resource shrinking
       //noinspection NotShrinkingResources
       shrinkResources false
 
@@ -92,15 +88,11 @@ android {
   }
 
   aaptOptions {
-    // Disables compression for these file types in both Debug and Release.
-    // Adding an empty string (noCompress '') would disable it for all files,
-    // but it is recommended to list specific extensions used in your project.
     noCompress 'zip', 'png', 'jpg', 'jpeg', 'ogg', 'json', 'atlas', 'fnt'
   }
 }
 
 repositories {
-  // needed for AAPT2, may be needed for other tools
   google()
 }
 
@@ -123,9 +115,6 @@ dependencies {
 
 }
 
-// Called every time gradle gets executed, takes the native dependencies of
-// the natives configuration, and extracts them to the proper libs/ folders
-// so they get packed with the APK.
 tasks.register('copyAndroidNatives') {
   doFirst {
     file("libs/armeabi-v7a/").mkdirs()
@@ -154,8 +143,6 @@ tasks.matching { it.name.contains("merge") && it.name.contains("JniLibFolders") 
   packageTask.dependsOn 'copyAndroidNatives'
 }
 
-// Shared helper: resolve the Android SDK dir the same way your 'run' task does,
-// from local.properties, falling back to ANDROID_SDK_ROOT / ANDROID_HOME.
 def resolveSdkDir = {
   def localProperties = project.file("../local.properties")
   if (localProperties.exists()) {
@@ -167,10 +154,24 @@ def resolveSdkDir = {
   return System.env.ANDROID_SDK_ROOT ?: System.env.ANDROID_HOME
 }
 
+def resolveAdb = {
+  def sdkDir = resolveSdkDir()
+  if (!sdkDir) {
+    throw new GradleException("Android SDK not found — set sdk.dir in local.properties or ANDROID_SDK_ROOT/ANDROID_HOME.")
+  }
+  def adb = ['adb.exe', 'adb'].collect { new File(sdkDir, "platform-tools/$it") }.find { it.isFile() }
+  if (!adb) throw new GradleException("adb not found under $sdkDir/platform-tools")
+  return adb.absolutePath
+}
+
+def launchActivity = 'aoc.kingdoms.lukasz.jakowski/aoc.kingdoms.lukasz.jakowski.android.AndroidLauncher'
+
+// Launches the app. The install it depends on is wired up at the bottom of this
+// file, once the zip64 task names and APK path exist.
 tasks.register('run', Exec) {
-  def path = resolveSdkDir()
-  def adb = path + "/platform-tools/adb"
-  commandLine "$adb", 'shell', 'am', 'start', '-n', 'aoc.kingdoms.lukasz.jakowski/aoc.kingdoms.lukasz.jakowski.android.AndroidLauncher'
+  group = 'zip64'
+  description = 'Builds, signs, installs and launches the zip64 APK'
+  commandLine resolveAdb(), 'shell', 'am', 'start', '-n', launchActivity
 }
 
 
@@ -289,7 +290,6 @@ def zShouldStore = { String entryName ->
   return zNoCompressExts.contains(entryName.substring(dot + 1).toLowerCase())
 }
 
-// Recursively adds every file under `dir` into the zip, with an optional path prefix.
 def addDirToZip = { ZipArchiveOutputStream zos, File dir, String prefix ->
   if (!dir.exists()) {
     logger.warn("[zip64] Skipping missing intermediate dir: $dir")
@@ -305,10 +305,8 @@ def addDirToZip = { ZipArchiveOutputStream zos, File dir, String prefix ->
   }
 }
 
-// Copies every entry of an existing zip/jar `src` into `zos`, preserving each
-// entry's original STORED/DEFLATED method instead of blindly re-deflating —
-// which would otherwise undo AAPT2's/AGP's own noCompress decisions (e.g. for
-// resources.arsc, which AAPT2 always stores uncompressed).
+// Preserves each entry's original STORED/DEFLATED method instead of re-deflating
+// — would otherwise undo AAPT2's/AGP's own noCompress decisions (e.g. resources.arsc).
 def addZipToZip = { ZipArchiveOutputStream zos, File src ->
   if (!src.exists()) {
     logger.warn("[zip64] Skipping missing intermediate archive: $src")
@@ -412,10 +410,6 @@ tasks.register("packZip64${zip64Variant}") {
 // entry's raw bytes as it goes, then appends META-INF/MANIFEST.MF, <alias>.SF
 // and <alias>.RSA as three final entries — never handing the archive to a
 // zip writer we don't control.
-//
-// JAR manifest format reminder (see JDK's jar spec): no line in
-// MANIFEST.MF/.SF may exceed 72 bytes in UTF-8; longer values continue on
-// following lines that start with exactly one space.
 //
 // This MUST wrap in the byte domain and never round-trip a chunk back through
 // String. A multi-byte UTF-8 character can straddle the 72-byte boundary, and
@@ -550,8 +544,28 @@ tasks.register("signZip64${zip64Variant}") {
   }
 }
 
+// AGP's package task is disabled for this variant (see afterEvaluate below), which
+// also takes install${zip64Variant} out of play — it installs AGP's own APK output,
+// which is never produced here. So the signed zip64 APK is pushed by hand instead.
+tasks.register("installZip64${zip64Variant}", Exec) {
+  group = 'zip64'
+  description = "Installs the signed zip64 APK (~1.5 GB, so this takes a few minutes)"
+  dependsOn "signZip64${zip64Variant}"
+  // -r reinstall, -t allow test-only builds, -d allow downgrade across rebuilds.
+  commandLine resolveAdb(), 'install', '-r', '-t', '-d', zSignedApk.absolutePath
+}
+
+// `gradlew :android:run` = build + sign + install + launch. am start only brings up
+// an activity that is already installed, so without this the task would silently
+// launch whatever stale build happened to be on the device.
+tasks.named('run') { dependsOn "installZip64${zip64Variant}" }
+
 // Disable AGP's own packaging task for this variant so a normal
 // assembleDebug/assembleRelease doesn't also try (and fail) alongside it.
 afterEvaluate {
   tasks.findByName("package${zip64Variant}")?.enabled = false
+  // Not part of the zip64 packing pipeline (assets are read straight from
+  // mergeDebugAssets output, not this task's compressed output), but it's
+  // otherwise a wasted pass over the same 65k+ debug assets every build.
+  tasks.findByName("compress${zip64Variant}Assets")?.enabled = false
 }

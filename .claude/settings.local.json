@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//var/home/yesq2/.android/avd/**)",
+      "Read(//var/home/yesq2/Android/Sdk/**)",
+      "Read(//var/home/yesq2/**)"
+    ]
+  }
+}

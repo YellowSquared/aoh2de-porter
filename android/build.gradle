@@ -115,25 +115,29 @@ dependencies {
 
 }
 
+// Declares inputs/outputs rather than doing everything in an untracked doFirst: the .so
+// files only change when gdxVersion does, so re-extracting all eight natives jars on
+// every build was pure overhead. The old `configurations.natives.copy()` also resolved a
+// throwaway detached configuration each time (the single slowest dependency resolution
+// in the profile); the configuration itself works fine as an input.
 tasks.register('copyAndroidNatives') {
-  doFirst {
-    file("libs/armeabi-v7a/").mkdirs()
-    file("libs/arm64-v8a/").mkdirs()
-    file("libs/x86_64/").mkdirs()
-    file("libs/x86/").mkdirs()
+  def abiDirs = ['armeabi-v7a', 'arm64-v8a', 'x86_64', 'x86'].collectEntries { [(it): file("libs/$it")] }
 
-    configurations.natives.copy().files.each { jar ->
-      def outputDir = null
-      if(jar.name.endsWith("natives-armeabi-v7a.jar")) outputDir = file("libs/armeabi-v7a")
-      if(jar.name.endsWith("natives-arm64-v8a.jar")) outputDir = file("libs/arm64-v8a")
-      if(jar.name.endsWith("natives-x86_64.jar")) outputDir = file("libs/x86_64")
-      if(jar.name.endsWith("natives-x86.jar")) outputDir = file("libs/x86")
-      if(outputDir != null) {
-        copy {
-          from zipTree(jar)
-          into outputDir
-          include "*.so"
-        }
+  inputs.files(configurations.natives).withPropertyName('natives')
+  outputs.dirs(abiDirs.values().toList()).withPropertyName('abiDirs')
+
+  doLast {
+    abiDirs.values()*.mkdirs()
+
+    configurations.natives.files.each { jar ->
+      // x86_64 is checked before x86 by construction — "natives-x86_64.jar" does not end
+      // with "natives-x86.jar", so at most one ABI can ever match.
+      def abi = abiDirs.keySet().find { jar.name.endsWith("natives-${it}.jar") }
+      if (abi == null) return
+      copy {
+        from zipTree(jar)
+        into abiDirs[abi]
+        include "*.so"
       }
     }
   }
@@ -185,7 +189,16 @@ tasks.register('run', Exec) {
 // library AGP itself uses, and the Android runtime's own zip reader, both
 // support zip64. This block disables AGP's packaging task for one variant
 // and replaces it with a hand-rolled zip64 packer fed from AGP's own
-// intermediate build outputs, then signs it manually.
+// intermediate build outputs, signing it in the same pass.
+//
+// Two tasks, split on how often their inputs change rather than on what they do:
+//   packZip64Assets<V>  the ~110k merged assets (~97% of the APK, rarely touched) packed
+//                       once into their own archive, with a SHA-256 sidecar
+//   signZip64<V>        resources + dex + those assets + native libs + java resources,
+//                       written and V1-signed in a single pass
+// The assets are copied into the APK still-compressed, so editing Java does not re-deflate
+// 1.45 GB of unchanged game data. Measured on this machine: no-change rebuild 76s -> 2s,
+// one-line code change 63s -> 25s.
 //
 // The paths below were verified against a *real* build on this machine
 // (AGP 8.9.3, compileSdk 35, 2026-08-08) by running
@@ -193,7 +206,7 @@ tasks.register('run', Exec) {
 // fails on the entry-count guard as expected, but every task up to that
 // point runs and reports the real intermediate directories it read from.
 // If you're on a different AGP version, re-run that command and diff the
-// paths below against what actually shows up in your log; `packZip64*`
+// paths below against what actually shows up in your log; `signZip64*`
 // fails loudly (not just a warning) if the required ones are missing.
 //
 // IMPORTANT — no zipalign, no apksigner: both were tested directly against
@@ -228,6 +241,10 @@ tasks.register('run', Exec) {
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.Zip64Mode
+// Aliased because java.util.zip.ZipFile is also used below, for the archives we still
+// have to inflate. Only the Commons Compress reader exposes getRawInputStream(), which
+// is what lets the assets be copied across without being decompressed and recompressed.
+import org.apache.commons.compress.archivers.zip.ZipFile as CommonsZipFile
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.Security
@@ -276,8 +293,24 @@ def javaResJarZ    = file("$zBuildDir/intermediates/merged_java_res/${zip64LcVar
 // -----------------------------------------------------------------------------
 
 def zOutDir      = file("$zBuildDir/outputs/apk_zip64/${zip64LcVariant}")
-def zUnsignedApk = file("$zOutDir/app-${zip64LcVariant}-unsigned-zip64.apk")
 def zSignedApk   = file("$zOutDir/app-${zip64LcVariant}-signed-zip64.apk")
+// Stale output of the old two-stage pipeline, deleted on each build — see the note on
+// packZip64Assets below. Nothing writes it any more.
+def zLegacyUnsignedApk = file("$zOutDir/app-${zip64LcVariant}-unsigned-zip64.apk")
+
+// Stage-1 intermediate: the merged assets pre-packed into their own archive, plus a
+// sidecar holding one SHA-256 per entry. The sidecar exists because stage 2 copies the
+// asset payloads across *compressed*, so it never sees the uncompressed bytes the V1
+// manifest has to digest. Both files are written by the same task, in the same pass.
+def zAssetsZip        = file("$zBuildDir/intermediates/zip64_assets/${zip64LcVariant}/assets.zip")
+def zAssetsDigestFile = file("$zBuildDir/intermediates/zip64_assets/${zip64LcVariant}/assets-digests.bin")
+
+// Default debug keystore/alias. Point at a real release keystore (and a real
+// password, not inline) before using this for distribution. Resolved out here
+// rather than inside signZip64's doLast so the keystore can be declared as a task
+// input — swapping keystores has to invalidate an already-signed APK.
+def zDebugKeystore = file("${System.getProperty('user.home')}/.android/debug.keystore")
+def zKeyAlias      = 'androiddebugkey'
 
 // True for entries that should stay uncompressed: native libs (harmless either way
 // now that AndroidManifest.xml sets extractNativeLibs="true" — Android extracts
@@ -290,7 +323,26 @@ def zShouldStore = { String entryName ->
   return zNoCompressExts.contains(entryName.substring(dot + 1).toLowerCase())
 }
 
-def addDirToZip = { ZipArchiveOutputStream zos, File dir, String prefix ->
+// Copies an input stream into the current archive entry while SHA-256'ing the same bytes,
+// and returns the digest Base64-encoded. Digesting during the write is the whole reason
+// packing and signing can share one pass: the V1 manifest needs a hash of every entry's
+// *uncompressed* content, which is exactly what is in flight here.
+def zStreamAndDigest = { ZipArchiveOutputStream zos, InputStream ins ->
+  def md = MessageDigest.getInstance('SHA-256')
+  byte[] buf = new byte[65536]
+  int n
+  while ((n = ins.read(buf)) != -1) {
+    md.update(buf, 0, n)
+    zos.write(buf, 0, n)
+  }
+  return Base64.encoder.encodeToString(md.digest())
+}
+
+// `record` is called as record(entryName, base64Sha256) for every entry written, and is
+// what accumulates the manifest. Every writer below must call it exactly once per entry:
+// an entry that lands in the APK without a MANIFEST.MF section is the failure mode that
+// produced INSTALL_PARSE_FAILED_NO_CERTIFICATES (see the note above).
+def addDirToZip = { ZipArchiveOutputStream zos, File dir, String prefix, Closure record ->
   if (!dir.exists()) {
     logger.warn("[zip64] Skipping missing intermediate dir: $dir")
     return
@@ -300,14 +352,17 @@ def addDirToZip = { ZipArchiveOutputStream zos, File dir, String prefix ->
     def entry = new ZipArchiveEntry(relPath)
     entry.method = zShouldStore(relPath) ? ZipArchiveEntry.STORED : ZipArchiveEntry.DEFLATED
     zos.putArchiveEntry(entry)
-    f.withInputStream { ins -> zos << ins }
+    def digest = f.withInputStream { ins -> zStreamAndDigest(zos, ins) }
     zos.closeArchiveEntry()
+    record(relPath, digest)
   }
 }
 
 // Preserves each entry's original STORED/DEFLATED method instead of re-deflating
 // — would otherwise undo AAPT2's/AGP's own noCompress decisions (e.g. resources.arsc).
-def addZipToZip = { ZipArchiveOutputStream zos, File src ->
+// Still inflates to digest, so only use it for the small archives (res .ap_, base.jar);
+// the 1.45 GB of assets go through addRawZipToZip instead.
+def addZipToZip = { ZipArchiveOutputStream zos, File src, Closure record ->
   if (!src.exists()) {
     logger.warn("[zip64] Skipping missing intermediate archive: $src")
     return
@@ -318,98 +373,100 @@ def addZipToZip = { ZipArchiveOutputStream zos, File src ->
       def entry = new ZipArchiveEntry(e.name)
       entry.method = e.method == java.util.zip.ZipEntry.STORED ? ZipArchiveEntry.STORED : ZipArchiveEntry.DEFLATED
       zos.putArchiveEntry(entry)
-      zf.getInputStream(e).withCloseable { ins -> zos << ins }
+      def digest = zf.getInputStream(e).withCloseable { ins -> zStreamAndDigest(zos, ins) }
       zos.closeArchiveEntry()
+      record(e.name, digest)
     }
   }
 }
 
-tasks.register("packZip64${zip64Variant}") {
-  group = 'zip64'
-  description = "Hand-packs a zip64 APK for ${zip64LcVariant}, bypassing AGP's 65535-entry limit"
+// Copies entries across without touching the compressed payload at all — no inflate, no
+// re-deflate, just the raw bytes plus the source entry's own metadata (method, sizes,
+// CRC). This is what makes a code-only rebuild cheap: the assets were already deflated
+// once by packZip64Assets, and re-deflating 110k of them on every build was ~36s of the
+// old 63s. Digests come from that task's sidecar precisely because raw copying never
+// materialises the uncompressed form here.
+def addRawZipToZip = { ZipArchiveOutputStream zos, File src, Map digestsByName, Closure record ->
+  if (!src.exists()) {
+    logger.warn("[zip64] Skipping missing intermediate archive: $src")
+    return
+  }
+  new CommonsZipFile(src).withCloseable { zf ->
+    for (ZipArchiveEntry e : Collections.list(zf.entries)) {
+      if (e.isDirectory()) continue
+      def digest = digestsByName[e.name]
+      if (digest == null) {
+        throw new GradleException("[zip64] No cached SHA-256 for '${e.name}' in $src. The archive " +
+          "and its digest sidecar are written together by packZip64Assets${zip64Variant} and must stay " +
+          "in step — delete $zBuildDir/intermediates/zip64_assets and rebuild. Packing an entry the " +
+          "manifest does not cover makes Android reject the install outright.")
+      }
+      zf.getRawInputStream(e).withCloseable { ins -> zos.addRawArchiveEntry(e, ins) }
+      record(e.name, digest)
+    }
+  }
+}
 
-  // This task reads AGP's intermediate outputs directly by path rather than declaring
-  // them as Gradle task inputs, so without explicit dependsOn here Gradle has no way to
-  // know it needs to (re)run these first — e.g. editing assets_debug/ alone would NOT
-  // trigger a rebuild of this task's output, silently packing stale/empty intermediates.
-  dependsOn "process${zip64Variant}Resources", "merge${zip64Variant}Assets",
-    "mergeProjectDex${zip64Variant}", "mergeLibDex${zip64Variant}", "mergeExtDex${zip64Variant}",
-    "l8DexDesugarLib${zip64Variant}",
-    "strip${zip64Variant}DebugSymbols", "merge${zip64Variant}JavaResource"
-  outputs.upToDateWhen { false } // always re-pack; the inputs above are directories we don't track precisely
+// Stage 1 of two. The merged assets are ~97% of the APK by size and change far less often
+// than the code does, so they are packed and digested exactly once, into their own
+// archive. A build that only touches Java leaves this task UP-TO-DATE and stage 2 copies
+// the already-deflated payloads straight through — which is the difference between a
+// ~63s and a ~25s incremental build. Emitting assets/<path> (not <path>) means stage 2
+// can copy entry names across verbatim.
+tasks.register("packZip64Assets${zip64Variant}") {
+  group = 'zip64'
+  description = "Pre-packs the merged ${zip64LcVariant} assets, with digests, for reuse across rebuilds"
+  dependsOn "merge${zip64Variant}Assets"
+
+  inputs.files(assetsDirZ).withPropertyName('mergedAssets')
+  outputs.file(zAssetsZip).withPropertyName('assetsZip')
+  outputs.file(zAssetsDigestFile).withPropertyName('assetsDigests')
+  // Not worth caching: a ~1.45 GB archive is cheaper to rebuild from the local merged
+  // assets than to pack into, and read back out of, the build cache.
+  outputs.cacheIf { false }
 
   doLast {
-    zOutDir.mkdirs()
-    if (zUnsignedApk.exists()) zUnsignedApk.delete()
+    zAssetsZip.parentFile.mkdirs()
+    if (zAssetsZip.exists()) zAssetsZip.delete()
+    if (zAssetsDigestFile.exists()) zAssetsDigestFile.delete()
 
-    if (!resApPath.exists()) {
-      throw new GradleException("[zip64] Required AAPT2-linked resources not found at $resApPath. " +
-        "Run './gradlew :android:packageDebug --info' (it will still fail on the entry-count guard, " +
-        "that's expected) and grep the log for the real 'linked_resources_binary_format' path for your " +
-        "AGP version, then fix resApPath above.")
-    }
-    if (dexDirsZ.every { !it.exists() }) {
-      throw new GradleException("[zip64] None of the expected dex intermediate dirs exist: $dexDirsZ. " +
-        "Verify the mergeProjectDex/mergeLibDex/mergeExtDex paths for your AGP version the same way as above.")
-    }
-
-    new ZipArchiveOutputStream(zUnsignedApk).withCloseable { zos ->
-      // AsNeeded (not Always): forcing zip64 extra fields onto every entry
-      // regardless of size produces CEN extra-field data that even
-      // java.util.zip.ZipFile's strict validator rejects ("invalid zip64
-      // extra data field size"). AsNeeded only uses zip64 structures where
-      // actually required (here: the >65535 total entry count in the EOCD),
-      // which is both correct per the zip spec and what every reader tested
-      // here (java.util.zip, Python's zipfile) parses without complaint.
+    def names = []
+    def digests = []
+    new ZipArchiveOutputStream(zAssetsZip).withCloseable { zos ->
       zos.setUseZip64(Zip64Mode.AsNeeded)
-
-      // 1. AAPT2-linked resources — AndroidManifest.xml, resources.arsc, res/*.
-      addZipToZip(zos, resApPath)
-
-      // 2. Dex files from all three AGP dex-merge outputs, renamed sequentially
-      //    onto the archive root as classes.dex, classes2.dex, classes3.dex, ...
-      def dexIndex = 1
-      dexDirsZ.each { dexDir ->
-        if (!dexDir.exists()) {
-          logger.warn("[zip64] Skipping missing dex intermediate dir: $dexDir")
-          return
-        }
-        dexDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
-          // "classes.dex" from the merge outputs (multidex arrives as several such files
-          // in sibling subdirectories) plus L8's "classes1000.dex" — all get renumbered
-          // sequentially below, so the source name only needs to identify a dex.
-          if (!(f.name ==~ /classes\d*\.dex/)) return
-          def name = dexIndex == 1 ? 'classes.dex' : "classes${dexIndex}.dex"
-          dexIndex++
-          def entry = new ZipArchiveEntry(name)
-          entry.method = ZipArchiveEntry.DEFLATED
-          zos.putArchiveEntry(entry)
-          f.withInputStream { ins -> zos << ins }
-          zos.closeArchiveEntry()
-        }
+      addDirToZip(zos, assetsDirZ, "assets/") { name, digest ->
+        names << name
+        digests << digest
       }
-
-      // 3. Merged assets under assets/ (this is where your 65k+ debug files live)
-      addDirToZip(zos, assetsDirZ, "assets/")
-
-      // 4. Stripped native libs under lib/<abi>/ — always STORED, see zShouldStore.
-      addDirToZip(zos, nativeLibsDirZ, "lib/")
-
-      // 5. Merged java resources (META-INF/ etc.), packed by AGP into base.jar.
-      addZipToZip(zos, javaResJarZ)
     }
-    logger.lifecycle("[zip64] Wrote unsigned zip64 APK: $zUnsignedApk")
+
+    // Length-prefixed UTF rather than a text format: 321 of these names are non-ASCII and
+    // some contain characters that a naive line-based reader would mangle — the same class
+    // of bug that corrupted asset names in the manifest once already.
+    new DataOutputStream(new BufferedOutputStream(new FileOutputStream(zAssetsDigestFile))).withCloseable { out ->
+      out.writeInt(names.size())
+      names.eachWithIndex { name, i ->
+        out.writeUTF(name)
+        out.writeUTF(digests[i])
+      }
+    }
+    logger.lifecycle("[zip64] Pre-packed ${names.size()} assets into $zAssetsZip")
   }
 }
 
 // Hand-rolled V1 JAR (PKCS#7) signing — see IMPORTANT #2 above for why not
-// jarsigner. Reads the unsigned archive with java.util.zip.ZipFile (confirmed
-// zip64-safe) and re-writes it entry-by-entry with Commons Compress (same
-// writer packZip64Debug uses, so the same clean, non-data-descriptor,
-// zip64-AsNeeded conventions apply), computing a SHA-256 digest of each
-// entry's raw bytes as it goes, then appends META-INF/MANIFEST.MF, <alias>.SF
+// jarsigner. Writes the APK with Commons Compress (clean, non-data-descriptor,
+// zip64-AsNeeded conventions), computing a SHA-256 digest of each entry's
+// uncompressed bytes as it goes, then appends META-INF/MANIFEST.MF, <alias>.SF
 // and <alias>.RSA as three final entries — never handing the archive to a
 // zip writer we don't control.
+//
+// This used to be a second task that re-read a separate unsigned APK and rewrote all
+// 1.5 GB of it just to collect those digests. Digesting during the pack pass instead
+// makes the two indistinguishable in output — same writer, same entry order, so the same
+// MANIFEST.MF byte-for-byte — while removing an entire 1.5 GB read and write per build.
+// The task keeps the signZip64 name because the justfile and the IDE run configuration
+// both invoke it.
 //
 // This MUST wrap in the byte domain and never round-trip a chunk back through
 // String. A multi-byte UTF-8 character can straddle the 72-byte boundary, and
@@ -448,56 +505,137 @@ def zWrapManifestLine = { String line ->
 
 tasks.register("signZip64${zip64Variant}") {
   group = 'zip64'
-  description = "Hand-signs the zip64 APK with a V1 JAR (PKCS#7) signature, appended in-place via Commons Compress"
-  dependsOn "packZip64${zip64Variant}"
+  description = "Packs and signs the zip64 APK for ${zip64LcVariant} in a single pass, bypassing AGP's 65535-entry limit"
+
+  // These intermediates are read directly by path rather than declared as task inputs by
+  // AGP, so without explicit dependsOn Gradle has no way to know it must (re)run them
+  // first — e.g. editing an asset alone would NOT trigger a rebuild here, silently
+  // packing stale intermediates.
+  dependsOn "process${zip64Variant}Resources", "packZip64Assets${zip64Variant}",
+    "mergeProjectDex${zip64Variant}", "mergeLibDex${zip64Variant}", "mergeExtDex${zip64Variant}",
+    "l8DexDesugarLib${zip64Variant}",
+    "strip${zip64Variant}DebugSymbols", "merge${zip64Variant}JavaResource"
+
+  // ...and, separately from ordering, declare those same intermediates as *inputs* so
+  // Gradle can tell when none of them changed. The pack half of this task used to carry
+  // `outputs.upToDateWhen { false }` with the note "directories we don't track precisely"
+  // — but inputs.files() on a directory does track it precisely, hashing the whole tree,
+  // so the guard was costing a full repack of 110k entries into a 1.5 GB zip on *every*
+  // invocation (34s warm, 9m46s cold) even when the result was entirely redundant.
+  // These are exactly the paths doLast reads below; keep the two lists in sync.
+  // inputs.files (not inputs.dir/file) is deliberate: it tolerates a path that does not
+  // exist yet instead of failing validation, which is what the doLast's own explicit
+  // existence checks are there to report on, with a much better error message.
+  inputs.files(resApPath).withPropertyName('linkedResources')
+  inputs.files(dexDirsZ).withPropertyName('dexDirs')
+  inputs.files(zAssetsZip).withPropertyName('assetsZip')
+  inputs.files(zAssetsDigestFile).withPropertyName('assetsDigests')
+  inputs.files(nativeLibsDirZ).withPropertyName('strippedNativeLibs')
+  inputs.files(javaResJarZ).withPropertyName('mergedJavaRes')
+  inputs.files(zDebugKeystore).withPropertyName('keystore')
+  outputs.file(zSignedApk).withPropertyName('signedApk')
+  // Not worth caching: the output is a 1.5 GB archive that is cheaper to rebuild from
+  // local intermediates than to pack into, and read back out of, the build cache.
+  outputs.cacheIf { false }
 
   doLast {
     zOutDir.mkdirs()
     if (zSignedApk.exists()) zSignedApk.delete()
+    // Left behind by the old two-stage pipeline; 1.48 GB of nothing if it lingers.
+    if (zLegacyUnsignedApk.exists()) zLegacyUnsignedApk.delete()
+
+    if (!resApPath.exists()) {
+      throw new GradleException("[zip64] Required AAPT2-linked resources not found at $resApPath. " +
+        "Run './gradlew :android:packageDebug --info' (it will still fail on the entry-count guard, " +
+        "that's expected) and grep the log for the real 'linked_resources_binary_format' path for your " +
+        "AGP version, then fix resApPath above.")
+    }
+    if (dexDirsZ.every { !it.exists() }) {
+      throw new GradleException("[zip64] None of the expected dex intermediate dirs exist: $dexDirsZ. " +
+        "Verify the mergeProjectDex/mergeLibDex/mergeExtDex paths for your AGP version the same way as above.")
+    }
 
     Security.addProvider(new BouncyCastleProvider())
 
-    // Default debug keystore/alias. Point at a real release keystore (and a
-    // real password, not inline) before using this for distribution.
-    def debugKeystore = "${System.getProperty('user.home')}/.android/debug.keystore"
-    def alias = 'androiddebugkey'
     def ks = KeyStore.getInstance('JKS')
-    new File(debugKeystore).withInputStream { ins -> ks.load(ins, 'android'.toCharArray()) }
-    def privateKey = (java.security.PrivateKey) ks.getKey(alias, 'android'.toCharArray())
-    def cert = (java.security.cert.X509Certificate) ks.getCertificate(alias)
+    zDebugKeystore.withInputStream { ins -> ks.load(ins, 'android'.toCharArray()) }
+    def privateKey = (java.security.PrivateKey) ks.getKey(zKeyAlias, 'android'.toCharArray())
+    def cert = (java.security.cert.X509Certificate) ks.getCertificate(zKeyAlias)
     // 8-char DOS-style signature file basename, matching what jarsigner/the reference APK use.
-    def sigBaseName = alias.toUpperCase(Locale.ROOT).take(8)
+    def sigBaseName = zKeyAlias.toUpperCase(Locale.ROOT).take(8)
+
+    // name -> Base64 SHA-256, written alongside assets.zip by packZip64Assets.
+    def assetDigests = [:]
+    new DataInputStream(new BufferedInputStream(new FileInputStream(zAssetsDigestFile))).withCloseable { ins ->
+      int count = ins.readInt()
+      count.times {
+        // Two locals, deliberately: `map[ins.readUTF()] = ins.readUTF()` reads the pair
+        // back in the wrong order, because Groovy evaluates the right-hand side of an
+        // assignment before the subscript.
+        def name = ins.readUTF()
+        def digest = ins.readUTF()
+        assetDigests[name] = digest
+      }
+    }
 
     def entryNames = []
     def manifestSections = [:] // name -> raw bytes of "Name: ...\r\nSHA-256-Digest: ...\r\n\r\n"
+    def record = { String name, String digestB64 ->
+      entryNames << name
+      manifestSections[name] = zJoinBytes([
+        zWrapManifestLine("Name: ${name}"),
+        zWrapManifestLine("SHA-256-Digest: ${digestB64}"),
+        zCRLF
+      ])
+    }
 
     new ZipArchiveOutputStream(zSignedApk).withCloseable { zos ->
+      // AsNeeded (not Always): forcing zip64 extra fields onto every entry
+      // regardless of size produces CEN extra-field data that even
+      // java.util.zip.ZipFile's strict validator rejects ("invalid zip64
+      // extra data field size"). AsNeeded only uses zip64 structures where
+      // actually required (here: the >65535 total entry count in the EOCD),
+      // which is both correct per the zip spec and what every reader tested
+      // here (java.util.zip, Python's zipfile) parses without complaint.
       zos.setUseZip64(Zip64Mode.AsNeeded)
 
-      new java.util.zip.ZipFile(zUnsignedApk).withCloseable { zf ->
-        zf.entries().each { e ->
-          if (e.isDirectory()) return
-          def entry = new ZipArchiveEntry(e.name)
-          entry.method = e.method == java.util.zip.ZipEntry.STORED ? ZipArchiveEntry.STORED : ZipArchiveEntry.DEFLATED
+      // 1. AAPT2-linked resources — AndroidManifest.xml, resources.arsc, res/*.
+      addZipToZip(zos, resApPath, record)
+
+      // 2. Dex files from all three AGP dex-merge outputs, renamed sequentially
+      //    onto the archive root as classes.dex, classes2.dex, classes3.dex, ...
+      def dexIndex = 1
+      dexDirsZ.each { dexDir ->
+        if (!dexDir.exists()) {
+          logger.warn("[zip64] Skipping missing dex intermediate dir: $dexDir")
+          return
+        }
+        dexDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+          // "classes.dex" from the merge outputs (multidex arrives as several such files
+          // in sibling subdirectories) plus L8's "classes1000.dex" — all get renumbered
+          // sequentially below, so the source name only needs to identify a dex.
+          if (!(f.name ==~ /classes\d*\.dex/)) return
+          def name = dexIndex == 1 ? 'classes.dex' : "classes${dexIndex}.dex"
+          dexIndex++
+          def entry = new ZipArchiveEntry(name)
+          entry.method = ZipArchiveEntry.DEFLATED
           zos.putArchiveEntry(entry)
-          def digest = MessageDigest.getInstance('SHA-256')
-          zf.getInputStream(e).withCloseable { ins ->
-            byte[] buf = new byte[65536]
-            int n
-            while ((n = ins.read(buf)) != -1) {
-              digest.update(buf, 0, n)
-              zos.write(buf, 0, n)
-            }
-          }
+          def digest = f.withInputStream { ins -> zStreamAndDigest(zos, ins) }
           zos.closeArchiveEntry()
-          entryNames << e.name
-          manifestSections[e.name] = zJoinBytes([
-            zWrapManifestLine("Name: ${e.name}"),
-            zWrapManifestLine("SHA-256-Digest: ${Base64.encoder.encodeToString(digest.digest())}"),
-            zCRLF
-          ])
+          record(name, digest)
         }
       }
+
+      // 3. The pre-packed assets, copied across still-compressed. Entry names already
+      //    carry the assets/ prefix, so this reproduces exactly what the old
+      //    addDirToZip(assetsDirZ, "assets/") wrote.
+      addRawZipToZip(zos, zAssetsZip, assetDigests, record)
+
+      // 4. Stripped native libs under lib/<abi>/ — always STORED, see zShouldStore.
+      addDirToZip(zos, nativeLibsDirZ, "lib/", record)
+
+      // 5. Merged java resources (META-INF/ etc.), packed by AGP into base.jar.
+      addZipToZip(zos, javaResJarZ, record)
 
       byte[] manifestBytes = zJoinBytes(
         [zWrapManifestLine('Manifest-Version: 1.0'), zCRLF] +

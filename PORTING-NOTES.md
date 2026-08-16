@@ -79,6 +79,9 @@ The tiled-logo symptom is the most diagnostic: it means the mask shaders are sam
 | `stripGameJar` substituting stock libGDX | All 1078 shared classes byte-identical to stock 1.10.0; only the 90 lwjgl3 backend classes differ, correctly excluded |
 | Different shader set / different game code | Both builds reference the same 7 shaders and contain the same classes (`MapBG`, `MapBG$WorldMap_Shaders`, `CFG`) |
 | Emulator host-GL translation | Corruption is **identical** under gfxstream (→Vulkan) and ANGLE (→D3D11), two unrelated implementations |
+| Shader compile/link failure hidden by `pedantic=false` | Logged at runtime: `shaderAlpha`, `shaderWater3`, `shaderAlpha_Map` all `compiled=true` with empty logs |
+| Texture size clamped below desktop | `GL_MAX_TEXTURE_SIZE=16384` on device — same as desktop. Also `MAX_VARYING_VECTORS=32`, `MAX_FRAGMENT_UNIFORM_VECTORS=2000`: no pressure |
+| `u_maskScale` / map overlays | `MapOv.dMO()` logs `oM empty` on the main menu — no overlays are loaded at all, yet the menu is corrupt. Overlays are not involved |
 
 ### Debugging technique: shadowing a game class from `:core`
 
@@ -97,20 +100,22 @@ class in `stripGameJar` so only one copy exists.
 
 Keep shadow classes behaviour-identical apart from logging, and delete them when done.
 
-### Leading hypothesis (untested)
+### Leading hypothesis (untested): row alignment on RGB888 uploads
 
-`u_maskScale` / `u_maskScaleY` are coming out too large, so the pattern texture tiles instead of
-mapping once across the quad:
+The evidence has moved from *how textures are sampled* to *how their pixels are uploaded*.
+Shaders compile, limits are ample, and the corrupt main menu draws no overlays at all — yet
+whole panels are vertically banded while text beside them is crisp.
 
-```glsl
-vec2 newCoords = vec2(v_texCoords.x * u_maskScale, v_texCoords.y * u_maskScaleY);
-```
+`IMGManager` has a dedicated `loadTexture_RGB888()`. RGB888 is **3** bytes per pixel, and OpenGL's
+default `GL_UNPACK_ALIGNMENT` is **4**. Whenever `width * 3` is not a multiple of 4, each row is
+read starting a few bytes off from the previous one, and the error accumulates down the image —
+producing exactly the observed smear/shear/banding. 4-byte RGBA textures are immune, which is
+why fonts and flags look fine.
 
-Regular vertical bars are what repeated wrapping of `u` looks like, and a runaway scale sampling
-the UI atlas would explain the tiled logo. If the scale is derived from texture dimensions, it
-would go wrong wherever a texture's real size differs from desktop — e.g. clamped by a lower
-`GL_MAX_TEXTURE_SIZE`. Worth checking `GL_MAX_TEXTURE_SIZE` on target hardware against the
-dimensions the game actually requests.
+To confirm: log every texture's name, dimensions and format at load, flagging any where
+`width * bytesPerPixel % 4 != 0`; then check whether the corrupt elements are exactly that set.
+The fix, if confirmed, is `glPixelStorei(GL_UNPACK_ALIGNMENT, 1)` before upload, or padding the
+offending textures to a multiple of 4.
 
 ### Test-environment caveats
 

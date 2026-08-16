@@ -16,7 +16,10 @@ and only `assets/game/shader/` is under version control (see `.gitignore`).
 |---|---|---|---|
 | 1 | Build pipeline: incremental zip64 packing | `15f72af` | **Keep** — verified |
 | 2 | Track `assets/game/shader/` in git | `4e665aa` | **Keep** — infrastructure |
-| 3 | Shaders: `mediump` → `highp` | `7bc3a5a` | **Reverted** — see below |
+| 3 | Shaders: `mediump` → `highp` | `7bc3a5a` | **Reverted** (`b53d652`) — unconfirmed |
+| 4 | ASM: neuter `HistoryManager$1.update()` | `6e0c3aa` | **Keep** — fixes the rendering corruption |
+| 5 | `configuration.useGL30 = true` | — | **Reverted** — disproved the NPOT theory, kept nothing |
+| 6 | Debug instrumentation in `core/src` | `05ff18b` | **Removed** — served its purpose, recoverable from history |
 
 ### 1. Build pipeline — incremental zip64 packing (`15f72af`)
 
@@ -58,7 +61,11 @@ worth revisiting; the precision reasoning is recorded in the `7bc3a5a` commit me
 
 ---
 
-## Open issue: rendering corruption on Android
+## Rendering corruption on Android — SOLVED (`6e0c3aa`)
+
+Fixed by neutering the `HistoryManager` task described below. Kept in full because the eliminated
+hypotheses are the expensive part: eight plausible theories died here, and without a record any of
+them is easy to start re-investigating.
 
 ### Symptoms
 
@@ -90,9 +97,19 @@ The tiled-logo symptom is the most diagnostic: it means the mask shaders are sam
 
 ### Debugging technique: shadowing a game class from `:core`
 
+*(The instrumentation itself has been removed — see `05ff18b` in history to resurrect it. This is
+kept as a recipe, because it is what actually cracked the bug.)*
+
 To add logging to game code without ASM, copy the decompiled class from `ref/` into
 `core/src/main/java/<same package>` and edit it as plain Java. ASM patching in `patch/` stays
 reserved for real fixes.
+
+Two classes cannot be shadowed, and it matters:
+
+- **`IMGManager`** imports `com.codedisaster.steamworks.SteamUGC`, which `stripGameJar` removes on
+  purpose — a verbatim copy will not compile. Read its public state from a separate class instead.
+- **`MapBG`** is ASM-patched by `MapBGPatcher`. A `:core` shadow wins on dex order, so shadowing it
+  would silently revert that fix. The same trap applies to any class `patch/` touches.
 
 This works because of dex ordering, which is worth understanding before relying on it. **Both**
 copies end up in the APK — verified: our `MapOv` lands in `classes3.dex`, the game jar's in

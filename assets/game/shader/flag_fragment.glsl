@@ -1,6 +1,10 @@
 #ifdef GL_ES
 #define LOWP lowp
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 #else
 #define LOWP
 #endif

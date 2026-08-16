@@ -42,7 +42,12 @@ public class SplashActivity extends Activity {
     private static final String TAG = "AssetDebug";
     private static final String ASSET_ARCHIVE = "assets.zip";
 
-    /** Written last and only on success, so an interrupted unpack is never taken for a good one. */
+    /**
+     * Written last and only on success, so an interrupted unpack is never taken for a good one.
+     * Holds the archive's byte length: an update that ships different assets changes that length,
+     * which forces a re-extract. Without it the app would keep serving the previous build's files
+     * forever, since a plain "done" flag cannot tell the two apart.
+     */
     private static final String MARKER = ".extraction-complete";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -55,8 +60,8 @@ public class SplashActivity extends Activity {
         destDir = new File(getFilesDir(), "assets");
         Log.d(TAG, "Destination Dir: " + destDir.getAbsolutePath());
 
-        if (new File(destDir, MARKER).exists()) {
-            Log.d(TAG, "assets already extracted, skipping unpack");
+        if (isExtractedAndCurrent()) {
+            Log.d(TAG, "assets already extracted and current, skipping unpack");
             launchGame();
             return;
         }
@@ -85,6 +90,46 @@ public class SplashActivity extends Activity {
         }, "asset-extract").start();
     }
 
+    /**
+     * True only if a previous extraction finished *and* it was of this build's archive. Comparing
+     * the recorded length against the current one is what makes an asset update re-extract; an
+     * unreadable or absent marker simply means "extract", which is the safe direction.
+     */
+    private boolean isExtractedAndCurrent() {
+        File marker = new File(destDir, MARKER);
+        if (!marker.exists()) return false;
+
+        long current = archiveLength();
+        if (current <= 0) {
+            // Length unavailable, so freshness cannot be judged. Trust the marker rather than
+            // re-extracting 1.4 GB on every launch.
+            Log.w(TAG, "archive length unknown; accepting existing extraction");
+            return true;
+        }
+
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(marker))) {
+            String line = r.readLine();
+            long recorded = line == null ? -1L : Long.parseLong(line.trim());
+            if (recorded == current) return true;
+            Log.d(TAG, "archive changed (" + recorded + " -> " + current + "), re-extracting");
+            return false;
+        } catch (Exception e) {
+            Log.w(TAG, "unreadable marker, re-extracting", e);
+            return false;
+        }
+    }
+
+    private long archiveLength() {
+        try {
+            AssetFileDescriptor afd = getAssets().openFd(ASSET_ARCHIVE);
+            long len = afd.getLength();
+            afd.close();
+            return len;
+        } catch (IOException e) {
+            return -1L;
+        }
+    }
+
     private void launchGame() {
         startActivity(new Intent(this, AndroidLauncher.class));
         // Finish so back from the game exits rather than returning to a dead splash.
@@ -103,20 +148,22 @@ public class SplashActivity extends Activity {
         File marker = new File(destDir, MARKER);
         //noinspection ResultOfMethodCallIgnored
         marker.delete();
+
+        // Clear the old tree rather than unpacking over it: a build that *removes* an asset would
+        // otherwise leave the stale file behind forever, since extraction only ever writes. Cheap
+        // to do — this only runs when the archive actually changed.
+        if (destDir.exists()) {
+            deleteRecursively(destDir);
+        }
         //noinspection ResultOfMethodCallIgnored
         destDir.mkdirs();
 
-        long totalBytes = -1L;
-        try {
-            AssetFileDescriptor afd = getAssets().openFd(ASSET_ARCHIVE);
-            totalBytes = afd.getLength();
-            afd.close();
-        } catch (IOException e) {
+        final long total = archiveLength();
+        if (total <= 0) {
             // Costs only the percentage, not the unpack.
-            Log.w(TAG, "could not read " + ASSET_ARCHIVE + " length; progress will be indeterminate", e);
+            Log.w(TAG, "could not read " + ASSET_ARCHIVE + " length; progress will be indeterminate");
         }
 
-        final long total = totalBytes;
         final String totalLabel = total > 0 ? humanBytes(total) : "?";
         if (total <= 0) {
             ui.post(new Runnable() {
@@ -193,9 +240,8 @@ public class SplashActivity extends Activity {
             return false;
         }
 
-        try {
-            //noinspection ResultOfMethodCallIgnored
-            marker.createNewFile();
+        try (FileOutputStream fos = new FileOutputStream(marker)) {
+            fos.write(Long.toString(total).getBytes("UTF-8"));
         } catch (IOException e) {
             Log.e(TAG, "could not write completion marker", e);
             return false;
@@ -203,6 +249,34 @@ public class SplashActivity extends Activity {
 
         Log.d(TAG, "Unpack complete. Files extracted: " + files);
         return true;
+    }
+
+    /** Iterative rather than recursive: the asset tree is deep and this runs on a 110k-entry copy. */
+    private static void deleteRecursively(File root) {
+        java.util.ArrayDeque<File> stack = new java.util.ArrayDeque<>();
+        java.util.ArrayDeque<File> dirs = new java.util.ArrayDeque<>();
+        stack.push(root);
+
+        while (!stack.isEmpty()) {
+            File f = stack.pop();
+            File[] children = f.listFiles();
+            if (children != null && children.length > 0) {
+                dirs.push(f);
+                for (File c : children) stack.push(c);
+            } else if (f.isDirectory()) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            } else {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+        }
+
+        // Directories are only removable once emptied, so unwind them deepest-first.
+        while (!dirs.isEmpty()) {
+            //noinspection ResultOfMethodCallIgnored
+            dirs.pop().delete();
+        }
     }
 
     private static String humanBytes(long bytes) {

@@ -62,6 +62,10 @@ tasks.register('patchGameJar') {
   def inputJar  = stripGameJar.archiveFile
   def outputJar = layout.buildDirectory.file('patched/game-patched.jar')
   inputs.file inputJar
+  // The patchers themselves are an input, not just the jar they read. Without this the task
+  // stays UP-TO-DATE after a patcher is edited, so the build reports success while shipping
+  // the previously patched jar — a failure mode that looks like the new patch not working.
+  inputs.files buildscript.configurations.classpath
   outputs.file outputJar
   doLast {
     GameJarPatcher.patch(inputJar.get().asFile, outputJar.get().asFile)

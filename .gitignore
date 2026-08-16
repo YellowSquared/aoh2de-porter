@@ -58,6 +58,10 @@ dex-tools-v2.4/
 ## Vendored JARs
 libs/game.jar
 
+## Decompiled game.jar, kept locally for reading and for the shadow-class trick described
+## in PORTING-NOTES. Regenerable from the vendored jar, which is itself untracked above.
+ref/
+
 ## AI / internal docs
 docs/for-claude/
 

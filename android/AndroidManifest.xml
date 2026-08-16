@@ -4,6 +4,11 @@
     <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
     <uses-feature android:name="android.hardware.type.pc" android:required="false" />
 
+    <!-- android:extractNativeLibs="true" used to be set here. It was a crutch: libGDX 1.10.0's
+         natives are 4 KB page-aligned, and extracting them at install time is what earned the app
+         PAGE_SIZE_APP_COMPAT_FLAG_LOAD_NOT_ALIGNED on a 16 KB-page device. libGDX 1.13.5 ships
+         16 KB-aligned .so files, so the libs can now be mapped straight out of the APK — which is
+         what the 16 KB requirement actually asks for, and saves the on-disk second copy. -->
     <application
         android:allowBackup="true"
         android:fullBackupContent="true"
@@ -14,7 +19,6 @@
         android:label="@string/app_name"
         android:largeHeap="true"
         android:hardwareAccelerated="true"
-        android:extractNativeLibs="true"
         tools:ignore="UnusedAttribute"
         android:theme="@style/GdxTheme">
 

@@ -13,7 +13,9 @@ apply plugin: 'com.android.application'
 
 android {
   namespace = "aoc.kingdoms.lukasz.jakowski"
-  compileSdk = 35
+  // 36, not 35, because gdx-backend-android 1.14.1+ pulls androidx.core:core:1.17.0, whose AAR
+  // metadata refuses to be compiled against anything older. Independent of targetSdk below.
+  compileSdk = 36
   sourceSets {
     main {
       manifest.srcFile 'AndroidManifest.xml'
@@ -34,6 +36,13 @@ android {
     }
   }
   packagingOptions {
+    // AGP's default since 8.0, stated explicitly because the 16 KB story depends on it: the
+    // .so files go into the APK uncompressed and 16 KB-aligned, so the loader mmaps them in
+    // place instead of the installer unpacking a second copy to /data. Flipping this back to
+    // true silently reintroduces the extractNativeLibs behaviour removed from the manifest.
+    jniLibs {
+      useLegacyPackaging = false
+    }
     resources {
       excludes += ['META-INF/robovm/ios/robovm.xml', 'META-INF/DEPENDENCIES.txt', 'META-INF/DEPENDENCIES',
                    'META-INF/dependencies.txt', '**/*.gwt.xml', '**/*.rl']
@@ -43,18 +52,16 @@ android {
   }
   defaultConfig {
     applicationId 'aoc.kingdoms.lukasz.jakowski'
-    minSdkVersion 21
-    // Pinned below 30 on purpose, and load-bearing. Raising this to 35 was tested
-    // directly against an API 36 emulator (2026-08-08) and the install fails:
+    minSdkVersion 26
+    // Raised from 28. The old comment here warned that targetSdk >= 30 fails to install with
     //
     //   -124: Targeting R+ (version 30 and above) requires the resources.arsc of
     //   installed APKs to be stored uncompressed and aligned on a 4-byte boundary
     //
-    // That failure belonged to the zip64 branch, where zipalign and apksigner both refuse to
-    // read the hand-rolled archive. This branch produces a stock AGP APK, so both tools work
-    // and raising targetSdk is plausible here — left at 28 only so the two branches stay
-    // comparable. Worth revisiting if this approach is adopted, since Play needs 35.
-    targetSdkVersion 28
+    // but that failure belonged to the zip64 branch, whose hand-rolled archive zipalign and
+    // apksigner both refuse to touch. This branch produces a stock AGP APK, so AGP stores
+    // resources.arsc uncompressed and aligned by itself. Play requires 35.
+    targetSdkVersion 35
     versionCode 1
     versionName "1.0"
     multiDexEnabled true
@@ -192,9 +199,18 @@ tasks.register('packAssetsZip', Zip) {
   destinationDirectory = layout.buildDirectory.dir('assets-zip')
   from rootProject.file('assets')
   // aaptOptions.noCompress 'zip' keeps AAPT from recompressing this, so whatever compression
-  // is chosen here is what ends up in the APK. Deflate: most assets are already-compressed
-  // png/ogg so the saving is modest, but it costs nothing at build time and the extractor
-  // inflates once.
+  // is chosen here is what ends up in the APK.
+  //
+  // STORED, not the default deflate, because deflate was never earning its keep here: the tree
+  // is 111,209 files / 1.62 GB of already-compressed png/ogg, and deflating it produced
+  // 1.54 GB — 95.4% of raw, i.e. 4.6% saved. That 4.6% (~79 MB of APK) buys nothing, while the
+  // inflate pass runs on every first launch of every install. Storing trades the 79 MB back
+  // for an extractor that only copies bytes.
+  //
+  // Note this necessarily grows the APK, and the device already needs room for the APK *plus*
+  // the extracted copy. It also changes assets.zip's length, which is exactly what
+  // SplashActivity's marker compares — so existing installs re-extract once, by design.
+  entryCompression = org.gradle.api.tasks.bundling.ZipEntryCompression.STORED
   includeEmptyDirs = false
   // Gradle's Zip task refuses >65535 entries unless told otherwise, and this holds ~125k —
   // the same limit that started all of this, hit one layer down. Harmless here: unlike the

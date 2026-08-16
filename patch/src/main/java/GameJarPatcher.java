@@ -38,10 +38,11 @@ public class GameJarPatcher {
                     data = HistoryManagerPatcher.patchClass(data);
                 }
 
-                // Applies to every class rather than a named one, and runs last so it sees the
+                // Apply to every class rather than a named one, and run last so they see the
                 // output of the targeted patches — the order the original chained build used.
                 if (entry.getName().endsWith(".class")) {
                     data = FileLimitPatcher.patchClass(data, entry.getName());
+                    data = CatchBackKeyPatcher.patchClass(data, entry.getName());
                 }
 
                 ZipEntry newEntry = new ZipEntry(entry.getName());
@@ -52,5 +53,6 @@ public class GameJarPatcher {
         }
 
         FileLimitPatcher.report();
+        CatchBackKeyPatcher.report();
     }
 }

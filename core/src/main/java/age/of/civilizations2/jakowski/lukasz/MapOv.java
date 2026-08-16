@@ -91,6 +91,7 @@ public class MapOv {
             try {
                this.dispose();
             } catch (Exception var7) {
+               PorterDiag.swallowed("MapOv.lO/dispose(missing-config)", var7);
             }
          }
       } catch (Exception var8) {
@@ -101,6 +102,7 @@ public class MapOv {
          try {
             this.dispose();
          } catch (Exception var6) {
+            PorterDiag.swallowed("MapOv.lO/dispose(load-failed)", var6);
          }
       }
 
@@ -151,6 +153,10 @@ public class MapOv {
    }
 
    public void dMO(SpriteBatch oSB, int nPosX, int nPosY, float fAlpha) {
+      // Hooked here purely because this runs every frame on both the menu and in game, and by
+      // the time it first fires the textures are all loaded. Fires once, then costs nothing.
+      PorterDiag.dumpTextureInventoryOnce();
+
       try {
          if (this.oM.isEmpty()) {
             if (!loggedDrawOnce) {

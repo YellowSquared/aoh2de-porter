@@ -214,6 +214,7 @@ public class Renderer {
             ((BitmapFont)CFG.fontMain.get(fontID)).draw(oSB, (CharSequence)sText, (float)nPosX, (float)(-nPosY));
          }
       } catch (Exception var7) {
+         PorterDiag.swallowed("Renderer.drawText", var7);
       }
 
    }
@@ -231,6 +232,7 @@ public class Renderer {
             ((BitmapFont)CFG.fontMain.get(fontID)).draw(oSB, (CharSequence)sText, (float)nPosX, (float)(-nPosY));
          }
       } catch (Exception var7) {
+         PorterDiag.swallowed("Renderer.drawTextWithShadow", var7);
       }
 
    }
@@ -248,6 +250,7 @@ public class Renderer {
             ((BitmapFont)CFG.fontMain.get(fontID)).draw(oSB, (CharSequence)sText, (float)nPosX, (float)(-nPosY));
          }
       } catch (Exception var7) {
+         PorterDiag.swallowed("Renderer.drawTextWithShadowAlpha", var7);
       }
 
    }
@@ -270,6 +273,7 @@ public class Renderer {
             ((BitmapFont)CFG.fontMain.get(fontID)).setColor(color);
             ((BitmapFont)CFG.fontMain.get(fontID)).draw(oSB, (CharSequence)sText, 0.0F, 0.0F);
          } catch (Exception var12) {
+         PorterDiag.swallowed("Renderer.drawTextWithShadowRotated", var12);
          } finally {
             oSB.setTransformMatrix(oldTransformMatrix);
          }
@@ -293,6 +297,7 @@ public class Renderer {
             ((BitmapFont)CFG.fontMain.get(fontID)).setColor(color);
             ((BitmapFont)CFG.fontMain.get(fontID)).draw(oSB, (CharSequence)sText, 0.0F, 0.0F);
          } catch (Exception var12) {
+         PorterDiag.swallowed("Renderer.drawTextRotated", var12);
          } finally {
             oSB.setTransformMatrix(oldTransformMatrix);
          }
@@ -332,6 +337,7 @@ public class Renderer {
             CFG.fontBorder.setColor(color);
             CFG.fontBorder.draw(oSB, (CharSequence)sText, 0.0F, 0.0F);
          } catch (Exception var11) {
+         PorterDiag.swallowed("Renderer.drawTextRotatedBorder", var11);
          } finally {
             oSB.setTransformMatrix(oldTransformMatrix);
          }
@@ -347,6 +353,7 @@ public class Renderer {
             CFG.fontBorder.draw(oSB, (CharSequence)sText, 0.0F, 0.0F);
          }
       } catch (Exception var6) {
+         PorterDiag.swallowed("Renderer.drawTextRotatedBorder", var6);
       }
 
    }
@@ -363,6 +370,7 @@ public class Renderer {
          oSB.setTransformMatrix(tmpMatrix);
          CFG.fontBorder.draw(oSB, (CharSequence)sText, 0.0F, 0.0F);
       } catch (Exception var6) {
+         PorterDiag.swallowed("Renderer.drawTextRotatedBorder_2", var6);
       }
 
    }
@@ -414,6 +422,7 @@ public class Renderer {
          oSB.flush();
          ScissorStack.popScissors();
       } catch (Exception var2) {
+         PorterDiag.swallowed("Renderer.clipView_End", var2);
       }
 
    }

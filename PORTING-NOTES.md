@@ -82,6 +82,11 @@ The tiled-logo symptom is the most diagnostic: it means the mask shaders are sam
 | Shader compile/link failure hidden by `pedantic=false` | Logged at runtime: `shaderAlpha`, `shaderWater3`, `shaderAlpha_Map` all `compiled=true` with empty logs |
 | Texture size clamped below desktop | `GL_MAX_TEXTURE_SIZE=16384` on device — same as desktop. Also `MAX_VARYING_VECTORS=32`, `MAX_FRAGMENT_UNIFORM_VECTORS=2000`: no pressure |
 | `u_maskScale` / map overlays | `MapOv.dMO()` logs `oM empty` on the main menu — no overlays are loaded at all, yet the menu is corrupt. Overlays are not involved |
+| Row alignment / `GL_UNPACK_ALIGNMENT` | Logged at runtime: `GL_UNPACK_ALIGNMENT=1` (libGDX sets it), and 0 of 147 textures have rows off a 4-byte boundary |
+| Stale `CFG.GAMEWIDTH/GAMEHEIGHT` | 2400x1080, matching `Gdx.graphics` **and** the backbuffer exactly. Framebuffer readbacks read the right region |
+| Silent GL errors | `glGetError` drained at first draw and after every border draw: always clean |
+| Exceptions swallowed by empty catches | All 20 in `ProvinceBorder` (19 of them `GdxRuntimeException`) and 9 in `Renderer` now report. **Nothing fires.** Nothing is throwing |
+| **NPOT textures with `GL_REPEAT`** | 9 such textures exist and correlate suspiciously well with the corrupt elements (`line32/33/62`, `pattern*`). But forcing a GLES3 context (`useGL30 = true`, verified: "creating OpenGL ES 3.0 context") lifts the GLES2 completeness restriction entirely — **and the corruption is pixel-identical.** Not the cause |
 
 ### Debugging technique: shadowing a game class from `:core`
 
@@ -100,7 +105,26 @@ class in `stripGameJar` so only one copy exists.
 
 Keep shadow classes behaviour-identical apart from logging, and delete them when done.
 
-### Leading hypothesis (untested): row alignment on RGB888 uploads
+### Where to look next
+
+Everything in the *upload and sampling* path has now been measured and cleared: formats, sizes,
+alignment, completeness, wrap modes, shader compilation, GL errors, exceptions. The textures
+arrive intact and nothing errors — yet specific elements draw as stripes.
+
+That points at *geometry rather than pixels*: the vertices/UVs being submitted, not the texture
+being sampled. Vertical banding with correct colours is what you get when a quad is drawn with
+wrong texture coordinates or wrong width, repeatedly. The elements that fail (the `pattern`-tiled
+"Challenges" panel, the title overlay) are drawn by tiling a small texture across a large area,
+so the next thing to instrument is the code computing those destination rectangles and UVs —
+`Image.draw(...)` and whichever menu class lays out that panel — logging the actual x/y/w/h and
+texture regions per draw.
+
+Note the one measurement that has not been reconciled: the texture inventory reported
+`[98] line32` as 5x1, while the border draw site reported the same index as 6x1. Textures appear
+to be reloaded at different sizes during startup. Worth understanding before trusting any
+size-derived reasoning.
+
+### Discarded hypothesis: row alignment on RGB888 uploads
 
 The evidence has moved from *how textures are sampled* to *how their pixels are uploaded*.
 Shaders compile, limits are ample, and the corrupt main menu draws no overlays at all — yet

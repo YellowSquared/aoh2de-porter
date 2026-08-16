@@ -16,7 +16,7 @@ and only `assets/game/shader/` is under version control (see `.gitignore`).
 |---|---|---|---|
 | 1 | Build pipeline: incremental zip64 packing | `15f72af` | **Keep** — verified |
 | 2 | Track `assets/game/shader/` in git | `4e665aa` | **Keep** — infrastructure |
-| 3 | Shaders: `mediump` → `highp` | `7bc3a5a` | **Unconfirmed** — revert candidate |
+| 3 | Shaders: `mediump` → `highp` | `7bc3a5a` | **Reverted** — see below |
 
 ### 1. Build pipeline — incremental zip64 packing (`15f72af`)
 
@@ -43,11 +43,18 @@ Equivalence was verified against a known-good APK built before the change: `META
 byte-identical (same MD5, 12 166 572 bytes), all 110 165 entries identical in name/order/size,
 `jarsigner -verify` reports "jar verified". Confirmed again from a fully clean build.
 
-### 3. Shaders: `mediump` → `highp` (`7bc3a5a`) — UNCONFIRMED
+### 3. Shaders: `mediump` → `highp` (`7bc3a5a`, reverted)
 
-Applied to all 9 fragment shaders while chasing the rendering corruption below. **The evidence
-now argues against it**: the working reference APK ships byte-identical shaders, `mediump`
-included, and renders correctly. Revert with `git revert 7bc3a5a` unless it later earns its place.
+Applied to all 9 fragment shaders while chasing the rendering corruption below, then reverted:
+the working reference APK ships byte-identical shaders with `mediump` and renders correctly, so
+the change diverged from known-good for no established benefit.
+
+It did *appear* to reduce panel banding when first tested, but that measurement is worthless —
+the emulator's GPU backend was switched in the same step, so the improvement is unattributable.
+If this is ever revisited, change one variable at a time.
+
+The shaders are back to their original bytes. The experiment survives in history if it is ever
+worth revisiting; the precision reasoning is recorded in the `7bc3a5a` commit message.
 
 ---
 

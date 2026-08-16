@@ -1,9 +1,5 @@
 #ifdef GL_ES
-	#ifdef GL_FRAGMENT_PRECISION_HIGH
-		#define PRECISION highp
-	#else
-		#define PRECISION mediump
-	#endif
+	#define PRECISION mediump
 	precision PRECISION float;
 	precision PRECISION int;
 #else

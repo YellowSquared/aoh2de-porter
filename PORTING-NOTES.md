@@ -80,6 +80,23 @@ The tiled-logo symptom is the most diagnostic: it means the mask shaders are sam
 | Different shader set / different game code | Both builds reference the same 7 shaders and contain the same classes (`MapBG`, `MapBG$WorldMap_Shaders`, `CFG`) |
 | Emulator host-GL translation | Corruption is **identical** under gfxstream (→Vulkan) and ANGLE (→D3D11), two unrelated implementations |
 
+### Debugging technique: shadowing a game class from `:core`
+
+To add logging to game code without ASM, copy the decompiled class from `ref/` into
+`core/src/main/java/<same package>` and edit it as plain Java. ASM patching in `patch/` stays
+reserved for real fixes.
+
+This works because of dex ordering, which is worth understanding before relying on it. **Both**
+copies end up in the APK — verified: our `MapOv` lands in `classes3.dex`, the game jar's in
+`classes4.dex`. Android's classloader takes the first match, and `dexDirsZ` in
+`android/build.gradle` lists `mergeLibDex` (which carries `:core`) before `mergeExtDex` (the
+vendored jar), so the `:core` copy wins. That order is explicit, not incidental — but it *is* a
+duplicate class, so if a shadow ever seems to have no effect, check which dex won before
+assuming the code is wrong. To make it robust rather than order-dependent, exclude the shadowed
+class in `stripGameJar` so only one copy exists.
+
+Keep shadow classes behaviour-identical apart from logging, and delete them when done.
+
 ### Leading hypothesis (untested)
 
 `u_maskScale` / `u_maskScaleY` are coming out too large, so the pattern texture tiles instead of

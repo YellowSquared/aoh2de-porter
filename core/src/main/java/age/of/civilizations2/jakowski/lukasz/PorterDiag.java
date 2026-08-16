@@ -69,6 +69,73 @@ public final class PorterDiag {
 
    private static final Map borderSeen = new HashMap();
    private static Map cachedNames = null;
+   private static final Map prevSig = new HashMap();
+   private static int driftTicks = 0;
+   private static int driftReports = 0;
+
+   /**
+    * Tests whether IMGManager.images shifts under the Images.* indices.
+    *
+    * IMGManager.addIMG appends and returns images.size()-1, and each Images.* static int keeps
+    * that index forever. Nothing re-validates them. If anything ever inserts or removes an entry
+    * — or the list is rebuilt in a different order — then every index past that point silently
+    * addresses its neighbour, and the game draws the wrong texture with no error of any kind.
+    *
+    * There is already evidence of exactly this: the early inventory saw index 98 as a 5x1 texture
+    * (line_32.png) and index 99 as 6x1 (line_33.png), while the later border draw saw 98 as 6x1
+    * and 99 as 8x1 (line_44.png) — one position out.
+    *
+    * So: snapshot every Images.* field as fieldName -> index:textureHandle:WxH, and report any
+    * entry whose mapping changes. A field whose index still points at a different *texture* than
+    * before is the bug, stated directly.
+    */
+   public static void checkImageIndexDrift() {
+      // Cheap guard: this runs per frame, so only actually scan every 60th call.
+      if (++driftTicks % 60 != 0 || driftReports > 40) {
+         return;
+      }
+
+      try {
+         for(Field f : Images.class.getDeclaredFields()) {
+            if (!Modifier.isStatic(f.getModifiers()) || f.getType() != Integer.TYPE) {
+               continue;
+            }
+
+            f.setAccessible(true);
+            int idx;
+            try {
+               idx = f.getInt((Object)null);
+            } catch (Exception var9) {
+               continue;
+            }
+
+            String sig;
+            if (IMGManager.images == null || idx < 0 || idx >= IMGManager.images.size()) {
+               sig = idx + ":ABSENT";
+            } else {
+               Image img = (Image)IMGManager.images.get(idx);
+               if (img == null || img.getTexture() == null) {
+                  sig = idx + ":NULL";
+               } else {
+                  Texture t = img.getTexture();
+                  sig = idx + ":h" + t.getTextureObjectHandle() + ":" + t.getWidth() + "x" + t.getHeight();
+               }
+            }
+
+            String name = f.getName();
+            String was = (String)prevSig.get(name);
+            if (was != null && !was.equals(sig)) {
+               ++driftReports;
+               Gdx.app.log(TAG, "!! INDEX DRIFT " + name + ": was " + was + " now " + sig);
+            }
+
+            prevSig.put(name, sig);
+         }
+      } catch (Exception ex) {
+         Gdx.app.log(TAG, "drift check failed: " + ex);
+      }
+
+   }
 
    /**
     * Full report on one texture used to draw a province border, emitted once per
@@ -91,11 +158,9 @@ public final class PorterDiag {
          }
 
          borderSeen.put(key, Boolean.TRUE);
-         if (cachedNames == null) {
-            cachedNames = buildIndexNames();
-         }
-
-         String name = (String)cachedNames.get(Integer.valueOf(imageId));
+         // Rebuilt each call rather than cached: the whole question is whether these mappings move,
+         // so a cached map would report yesterday's answer.
+         String name = (String)buildIndexNames().get(Integer.valueOf(imageId));
          if (imageId < 0 || imageId >= IMGManager.images.size()) {
             Gdx.app.log(TAG, "BORDER " + site + " imageId=" + imageId + " OUT OF RANGE (images="
                + IMGManager.images.size() + ") — nothing valid can be drawn");
@@ -130,6 +195,69 @@ public final class PorterDiag {
          Gdx.app.log(TAG, "borderDraw report failed: " + ex);
       }
 
+   }
+
+   private static boolean verifiedKnown = false;
+
+   /**
+    * Direct test of the shift theory, independent of drift-over-time.
+    *
+    * These Images.* fields have known source files with known pixel sizes (read straight off the
+    * PNG headers in assets/UI/lines/). If Images.line33 does not point at a 6x1 texture, then the
+    * index is addressing the wrong entry — no further inference needed. The neighbouring sizes
+    * are deliberately distinct, so an off-by-one is unambiguous: 5x1 / 6x1 / 8x1 in a row.
+    */
+   public static void verifyKnownTextures() {
+      if (verifiedKnown || IMGManager.images == null || IMGManager.images.size() < 110) {
+         return;
+      }
+
+      verifiedKnown = true;
+      String[][] expect = new String[][]{
+         {"line11", "2", "1"}, {"line22", "4", "1"}, {"line26", "8", "1"},
+         {"line32", "5", "1"}, {"line32Off1", "5", "1"}, {"line32Vertical", "1", "5"},
+         {"line33", "6", "1"}, {"line44", "8", "1"}, {"line62", "8", "9"}
+      };
+      int bad = 0;
+      Gdx.app.log(TAG, "=== verifying known texture identities ===");
+
+      for(int i = 0; i < expect.length; ++i) {
+         try {
+            Field f = Images.class.getDeclaredField(expect[i][0]);
+            f.setAccessible(true);
+            int idx = f.getInt((Object)null);
+            if (idx < 0 || idx >= IMGManager.images.size()) {
+               Gdx.app.log(TAG, "  " + expect[i][0] + " -> index " + idx + " OUT OF RANGE");
+               ++bad;
+               continue;
+            }
+
+            Image img = (Image)IMGManager.images.get(idx);
+            Texture t = img != null ? img.getTexture() : null;
+            if (t == null) {
+               Gdx.app.log(TAG, "  " + expect[i][0] + " -> index " + idx + " NULL texture");
+               ++bad;
+               continue;
+            }
+
+            int ew = Integer.parseInt(expect[i][1]);
+            int eh = Integer.parseInt(expect[i][2]);
+            boolean ok = t.getWidth() == ew && t.getHeight() == eh;
+            if (!ok) {
+               ++bad;
+            }
+
+            Gdx.app.log(TAG, "  " + (ok ? "ok   " : "WRONG") + " " + expect[i][0]
+               + " idx=" + idx + " expected=" + ew + "x" + eh
+               + " actual=" + t.getWidth() + "x" + t.getHeight());
+         } catch (Exception ex) {
+            Gdx.app.log(TAG, "  " + expect[i][0] + " check failed: " + ex);
+         }
+      }
+
+      Gdx.app.log(TAG, "=== " + bad + " of " + expect.length
+         + " known textures resolve to the WRONG image"
+         + (bad > 0 ? " — IMGManager indices are shifted" : " — indices are correct") + " ===");
    }
 
    /** Bytes per pixel, for the row-stride arithmetic below. */

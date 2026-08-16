@@ -105,7 +105,59 @@ class in `stripGameJar` so only one copy exists.
 
 Keep shadow classes behaviour-identical apart from logging, and delete them when done.
 
-### Where to look next
+### ROOT CAUSE FOUND: HistoryManager shifts IMGManager's image list on mobile
+
+`HistoryLog/HistoryManager.java`:
+
+```java
+HISTORY_LIMIT = CFG.getIsDesktop() ? 200 : 50;        // line 37
+...
+public final void clearHistory() {
+   CFG.timelapseManager.timelapseStatsHistory.lHistory.clear();
+   if (HISTORY_LIMIT == 50) {                          // i.e. "if not desktop"
+      Core.addSimpleTask(new Core.SimpleTask("127" + CFG.oR.nextInt(77)) {
+         public void update() {
+            IMGManager.getImages().remove(4);           // shifts every index above 4
+            IMGManager.getImages().add((Image)IMGManager.getImages().get(1));
+         }
+      });
+   }
+}
+```
+
+`IMGManager.addIMG` returns `images.size() - 1`, and each of the ~325 `Images.*` static ints keeps
+that index forever. Removing element 4 slides everything above it down one position, so from then
+on **every one of those constants resolves to its neighbour's texture**. The list size is
+preserved by appending a duplicate of index 1, which is what stops it looking obviously broken.
+
+`HISTORY_LIMIT == 50` is precisely equivalent to "not desktop", so this fires on Android and never
+on desktop — which is why identical code, assets and shaders render correctly on PC. It disposes
+nothing and frees no memory, so it is not an optimisation. The randomised task name
+(`"127" + nextInt(77)`) and the deferred execution suggest a deliberate anti-tamper trap.
+
+Confirmed present in the vendored `libs/game.jar`, not just the decompile — `HistoryManager$1.update()`
+contains `iconst_4; List.remove(I)` and `iconst_1; List.get(I); List.add`.
+
+**Evidence that clinched it** — the drift detector caught the slide with texture handles, index
+constant while content moved:
+
+```
+armyLeft:      was 24:h75:38x26  now 24:h76:12x26
+armyBG:        was 25:h76:12x26  now 25:h77:1x26
+armyMiddle:    was 26:h77:1x26   now 26:h78:21x14
+army_sea:      was 27:h78:21x14  now 27:h79:3x20
+```
+
+This explains every symptom: Android-only; silent (drawing a valid wrong texture raises no GL
+error, which is why all 29 catch blocks and every `glGetError` stayed clean); wrong *images*
+rather than damaged pixels (the tiled logo over the map is simply another texture); and identical
+under gfxstream and ANGLE because the GPU is not involved.
+
+**Fix belongs in `patch/` as ASM.** Either neuter `HistoryManager$1.update()` to a bare `return`
+(its only purpose is the sabotage), or change the non-desktop `HISTORY_LIMIT` from 50 to 51 so the
+guard never matches — the history cap moving by one entry is immaterial.
+
+### Superseded — where to look next
 
 Everything in the *upload and sampling* path has now been measured and cleared: formats, sizes,
 alignment, completeness, wrap modes, shader compilation, GL errors, exceptions. The textures

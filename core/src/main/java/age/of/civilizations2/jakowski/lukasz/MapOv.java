@@ -156,6 +156,8 @@ public class MapOv {
       // Hooked here purely because this runs every frame on both the menu and in game, and by
       // the time it first fires the textures are all loaded. Fires once, then costs nothing.
       PorterDiag.dumpTextureInventoryOnce();
+      PorterDiag.verifyKnownTextures();
+      PorterDiag.checkImageIndexDrift();
 
       try {
          if (this.oM.isEmpty()) {

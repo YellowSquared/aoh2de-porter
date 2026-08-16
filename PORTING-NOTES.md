@@ -1,0 +1,104 @@
+# Porting notes
+
+Running record of what this port changes relative to the stock desktop game, and what has
+already been investigated. Two things belong here that git history alone does not capture:
+**why** a change exists, and **which hypotheses have been eliminated** — the latter is the
+expensive knowledge, because a ruled-out cause is easy to re-investigate by accident.
+
+Anything touching `assets/` deserves special care: the asset tree is re-extracted wholesale
+and only `assets/game/shader/` is under version control (see `.gitignore`).
+
+---
+
+## Changes
+
+| # | Change | Commit | Status |
+|---|---|---|---|
+| 1 | Build pipeline: incremental zip64 packing | `15f72af` | **Keep** — verified |
+| 2 | Track `assets/game/shader/` in git | `4e665aa` | **Keep** — infrastructure |
+| 3 | Shaders: `mediump` → `highp` | `7bc3a5a` | **Unconfirmed** — revert candidate |
+
+### 1. Build pipeline — incremental zip64 packing (`15f72af`)
+
+Measured on this machine:
+
+| Scenario | Before | After |
+|---|---|---|
+| No-change rebuild | 76 s | 2 s |
+| One-line code change | 63 s | 11 s |
+| Clean build | ~11 m 30 s | ~11 m 30 s |
+
+Four separate problems, all in `android/build.gradle` and `gradle.properties`:
+
+- `packZip64` carried `outputs.upToDateWhen { false }`, repacking 1.5 GB on *every* invocation.
+  The justification ("directories we don't track precisely") was wrong — `inputs.files()` on a
+  directory hashes the whole tree.
+- `signZip64` declared no outputs, so it could never be up to date and re-wrote 1.5 GB every run.
+- Packing and signing each made a full pass over the APK. Digests are now computed *during*
+  packing, so there is one pass, and the unsigned intermediate no longer exists.
+- Assets (~97% of the APK, rarely changed) are pre-packed once by `packZip64Assets` and copied
+  into the APK **still compressed** via `addRawArchiveEntry`.
+
+Equivalence was verified against a known-good APK built before the change: `META-INF/MANIFEST.MF`
+byte-identical (same MD5, 12 166 572 bytes), all 110 165 entries identical in name/order/size,
+`jarsigner -verify` reports "jar verified". Confirmed again from a fully clean build.
+
+### 3. Shaders: `mediump` → `highp` (`7bc3a5a`) — UNCONFIRMED
+
+Applied to all 9 fragment shaders while chasing the rendering corruption below. **The evidence
+now argues against it**: the working reference APK ships byte-identical shaders, `mediump`
+included, and renders correctly. Revert with `git revert 7bc3a5a` unless it later earns its place.
+
+---
+
+## Open issue: rendering corruption on Android
+
+### Symptoms
+
+- Province borders render as solid black blobs, or as scattered yellow glyphs
+- The "Age of History II" logo appears tiled across the map
+- UI panels (main-menu title, "Challenges" box) show regular **vertical striping**
+- Menu text, world-map terrain, and language-select flags all render **correctly**
+
+The tiled-logo symptom is the most diagnostic: it means the mask shaders are sampling the
+**UI/logo atlas** rather than their intended texture, and repeating it.
+
+### Ruled out — do not re-investigate without new evidence
+
+| Hypothesis | How it was eliminated |
+|---|---|
+| zip64 packaging / asset count | Reproduces at 30k assets and on a classic libGDX build |
+| `mediump` shader precision | Reference APK ships **byte-identical** shaders, `mediump` included |
+| `stripGameJar` substituting stock libGDX | All 1078 shared classes byte-identical to stock 1.10.0; only the 90 lwjgl3 backend classes differ, correctly excluded |
+| Different shader set / different game code | Both builds reference the same 7 shaders and contain the same classes (`MapBG`, `MapBG$WorldMap_Shaders`, `CFG`) |
+| Emulator host-GL translation | Corruption is **identical** under gfxstream (→Vulkan) and ANGLE (→D3D11), two unrelated implementations |
+
+### Leading hypothesis (untested)
+
+`u_maskScale` / `u_maskScaleY` are coming out too large, so the pattern texture tiles instead of
+mapping once across the quad:
+
+```glsl
+vec2 newCoords = vec2(v_texCoords.x * u_maskScale, v_texCoords.y * u_maskScaleY);
+```
+
+Regular vertical bars are what repeated wrapping of `u` looks like, and a runaway scale sampling
+the UI atlas would explain the tiled logo. If the scale is derived from texture dimensions, it
+would go wrong wherever a texture's real size differs from desktop — e.g. clamped by a lower
+`GL_MAX_TEXTURE_SIZE`. Worth checking `GL_MAX_TEXTURE_SIZE` on target hardware against the
+dimensions the game actually requests.
+
+### Test-environment caveats
+
+The only AVD available (`Medium_Phone`) is a poor proxy for real hardware, and comparisons
+against the reference APK on it are invalid:
+
+- It is a **16 KB page-size** image (`google_apis_playstore_ps16k`). Our app runs only because
+  `extractNativeLibs="true"` earns it `PAGE_SIZE_APP_COMPAT_FLAG_LOAD_NOT_ALIGNED` — libGDX 1.10.0
+  natives are 4 KB aligned.
+- The **reference APK cannot run here at all**: it is arm64-v8a only, and under ARM translation the
+  linker enforces the 16 KB requirement strictly — `dlopen` fails on `libgdx.so`.
+
+So "reference works, ours is corrupt" was never a like-for-like comparison: the reference has only
+ever been observed on real 4 KB-page ARM hardware. **Verifying on a real device, or on a standard
+4 KB-page AVD, should come before any further code-level investigation.**

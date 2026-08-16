@@ -40,8 +40,16 @@ local.properties
 .DS_Store
 Thumbs.db
 
-## Assets
-assets/
+## Assets — extracted game data, vendored and far too large for git.
+## Exception: assets/game/shader/ (11 small GLSL files). Those are the only part of the
+## asset tree that gets hand-edited, and nothing else records those edits — the assets are
+## re-extracted wholesale, so an untracked change there is one `rm -rf` from being lost.
+## Re-including needs the parent dirs left un-ignored: git cannot re-include a file whose
+## parent directory is itself excluded, hence `assets/*` rather than `assets/`.
+assets/*
+!assets/game/
+assets/game/*
+!assets/game/shader/
 assets_debug/
 
 ## Dex tools

@@ -1,2 +1,7 @@
 * text=auto eol=lf
 *.bat text=auto eol=crlf
+
+# Vendored game shaders: keep the bytes exactly as they ship (CRLF included) so they stay
+# comparable to the originals extracted from a released APK. Normalising them to LF would
+# make every byte-for-byte diff against a reference build fail for no useful reason.
+assets/game/shader/*.glsl -text

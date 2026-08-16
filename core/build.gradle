@@ -6,7 +6,8 @@ dependencies {
     api "com.badlogicgames.gdx:gdx-freetype:$gdxVersion"
     api "com.badlogicgames.gdx:gdx:$gdxVersion"
     // Exposes the ASM-patched game jar to consumers. patchGameJar runs after stripGameJar
-    // and surgically fixes MapBG.updateMinimapResolution without touching mod changes.
+    // and surgically fixes the Android-only defects (MapBG.updateMinimapResolution, and the
+    // HistoryManager task that shifts IMGManager's image list) without touching mod changes.
     api files(rootProject.layout.buildDirectory.file('patched/game-patched.jar')).builtBy(patchTask)
 }
 

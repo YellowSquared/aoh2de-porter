@@ -11,13 +11,7 @@ import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.util.HashMap;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
-import java.util.zip.ZipOutputStream;
 
 /**
  * Fixes MapBG.updateMinimapResolution in a game jar by moving the
@@ -31,30 +25,10 @@ import java.util.zip.ZipOutputStream;
  */
 public class MapBGPatcher {
 
-    private static final String MAPBG_CLASS = "age/of/civilizations2/jakowski/lukasz/MapBG.class";
-
-    public static void patch(File input, File output) throws Exception {
-        output.getParentFile().mkdirs();
-        try (ZipInputStream zin = new ZipInputStream(new FileInputStream(input));
-             ZipOutputStream zout = new ZipOutputStream(new FileOutputStream(output))) {
-
-            ZipEntry entry;
-            while ((entry = zin.getNextEntry()) != null) {
-                byte[] data = zin.readAllBytes();
-
-                if (entry.getName().equals(MAPBG_CLASS)) {
-                    data = patchClass(data);
-                }
-
-                ZipEntry newEntry = new ZipEntry(entry.getName());
-                zout.putNextEntry(newEntry);
-                zout.write(data);
-                zout.closeEntry();
-            }
-        }
-    }
-
-    private static byte[] patchClass(byte[] classBytes) {
+    // The jar traversal moved to GameJarPatcher once a second class needed fixing, so that a
+    // 27 MB archive is rewritten once rather than per patch. This class is now purely the MapBG
+    // transform, invoked from there.
+    static byte[] patchClass(byte[] classBytes) {
         ClassReader cr = new ClassReader(classBytes);
         ClassNode cn = new ClassNode();
         cr.accept(cn, 0);

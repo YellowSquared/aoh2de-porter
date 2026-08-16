@@ -64,7 +64,7 @@ tasks.register('patchGameJar') {
   inputs.file inputJar
   outputs.file outputJar
   doLast {
-    MapBGPatcher.patch(inputJar.get().asFile, outputJar.get().asFile)
+    GameJarPatcher.patch(inputJar.get().asFile, outputJar.get().asFile)
   }
 }
 

@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="app_name">World Crisis</string>
+
+  <!-- First-launch asset extraction (see layout/extract_progress.xml). -->
+  <string name="extract_title">Preparing game files</string>
+  <string name="extract_subtitle">This happens once, on first launch.\nPlease keep the app open.</string>
+  <string name="extract_starting">Starting…</string>
+  <!-- %1$d percent, %2$s extracted so far, %3$s total -->
+  <string name="extract_progress">%1$d%% · %2$s of %3$s</string>
+  <string name="extract_failed">Extraction failed. Please reinstall the app.</string>
 </resources>

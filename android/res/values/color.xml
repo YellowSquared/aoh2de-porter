@@ -2,4 +2,10 @@
 <resources>
     <color name="ic_background_color">#362618FF</color>
     <color name="background">#FFFFFFFF</color>
+
+    <!-- First-launch extraction screen. Dark, so it does not flash white before the game's
+         own dark loading screen takes over. -->
+    <color name="extract_background">#FF10161F</color>
+    <color name="extract_title_text">#FFE0A93A</color>
+    <color name="extract_body_text">#FFB9C2CE</color>
 </resources>

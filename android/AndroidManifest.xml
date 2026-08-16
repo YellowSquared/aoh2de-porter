@@ -18,6 +18,22 @@
         tools:ignore="UnusedAttribute"
         android:theme="@style/GdxTheme">
 
+        <!-- Entry point. Unpacks assets.zip on first run behind a progress bar, then starts
+             AndroidLauncher. Extraction cannot live in AndroidLauncher itself: that class
+             extends AndroidApplication, whose onResume() dereferences state that only exists
+             once initialize() has run, so deferring initialize() until the unpack finishes
+             crashes on resume. An activity with an intent-filter must be exported on API 31+. -->
+        <activity
+            android:name="aoc.kingdoms.lukasz.jakowski.android.SplashActivity"
+            android:label="@string/app_name"
+            android:screenOrientation="landscape"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
         <activity
             android:name="aoc.kingdoms.lukasz.jakowski.android.AndroidLauncher"
             android:label="@string/app_name"
@@ -25,15 +41,6 @@
             android:windowSoftInputMode="stateHidden|adjustPan"
             android:resizeableActivity="false"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|fontScale"
-            android:exported="true">
-            <!-- The launcher entry point lived on SplashActivity until 502ba74 removed that
-                 class along with the ASM-patch approach; without this the package installs
-                 but has no launchable activity ("No activities found to run"). An activity
-                 with an intent-filter must be exported="true" on API 31+. -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
-            </intent-filter>
-        </activity>
+            android:exported="false" />
     </application>
 </manifest>

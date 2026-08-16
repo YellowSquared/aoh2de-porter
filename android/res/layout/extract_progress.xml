@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  First-launch extraction screen.
+
+  The game ships its ~125k asset files as a single assets.zip so the APK stays under AGP's
+  65,535-entry limit; that archive has to be unpacked to internal storage before libGDX starts.
+  It is ~1.5 GB, so the unpack takes minutes on a slow device. Without this screen the app shows
+  a black window for that entire time and reads as a hang — which is the only reason it exists.
+
+  Shown only when the assets directory is absent, i.e. first launch and after "clear data".
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@color/extract_background"
+    android:padding="32dp">
+
+    <TextView
+        android:id="@+id/extract_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/extract_title"
+        android:textColor="@color/extract_title_text"
+        android:textSize="22sp"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:id="@+id/extract_subtitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/extract_subtitle"
+        android:textColor="@color/extract_body_text"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:layout_marginBottom="28dp" />
+
+    <ProgressBar
+        android:id="@+id/extract_bar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="100"
+        android:progress="0" />
+
+    <TextView
+        android:id="@+id/extract_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/extract_body_text"
+        android:textSize="13sp"
+        android:layout_marginTop="12dp"
+        android:text="@string/extract_starting" />
+
+</LinearLayout>

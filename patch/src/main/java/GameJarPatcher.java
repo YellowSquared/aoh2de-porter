@@ -22,6 +22,8 @@ public class GameJarPatcher {
             "age/of/civilizations2/jakowski/lukasz/MapBG.class";
     private static final String HISTORY_TASK_CLASS =
             "age/of/civilizations2/jakowski/lukasz/HistoryLog/HistoryManager$1.class";
+    private static final String SERVICE_RIBBON_CLASS =
+            "age/of/civilizations2/jakowski/lukasz/ServiceRibbon_Manager.class";
 
     public static void patch(File input, File output) throws Exception {
         output.getParentFile().mkdirs();
@@ -36,6 +38,8 @@ public class GameJarPatcher {
                     data = MapBGPatcher.patchClass(data);
                 } else if (entry.getName().equals(HISTORY_TASK_CLASS)) {
                     data = HistoryManagerPatcher.patchClass(data);
+                } else if (entry.getName().equals(SERVICE_RIBBON_CLASS)) {
+                    data = ServiceRibbonPatcher.patchClass(data);
                 }
 
                 // Apply to every class rather than a named one, and run last so they see the

@@ -20,10 +20,12 @@ and only `assets/game/shader/` is under version control (see `.gitignore`).
 | 4 | ASM: neuter `HistoryManager$1.update()` | `6e0c3aa` | **Keep** — fixes the rendering corruption |
 | 5 | `configuration.useGL30 = true` | — | **Reverted** — disproved the NPOT theory, kept nothing |
 | 6 | Debug instrumentation in `core/src` | `05ff18b` | **Removed** — served its purpose, recoverable from history |
-| 7 | SDK 26/35, libGDX 1.13.5, native libs unextracted | — | **Keep** — 16 KB page compliance |
+| 7 | SDK 26/35/36, libGDX 1.14.2, native libs unextracted | — | **Keep** — 16 KB page compliance |
 | 8 | ASM: `setCatchBackKey` → `setCatchKey(Keys.BACK, …)` | — | **Keep** — required by change 7 |
 | 9 | `patchGameJar` declares the patchers as an input | — | **Keep** — build correctness |
 | 10 | `assets.zip` stored instead of deflated | — | **Keep** — deflate saved 4.6% |
+| 11 | ASM: remove the logo-triggered `ServiceRibbon_Manager` sabotage | — | **Keep** — second image-list trap |
+| 12 | Asset: strip trailing newline from the map-scale index | — | **Keep** — fixes map-resolution menu |
 
 ### 10. `assets.zip` is STORED, not deflated
 
@@ -49,12 +51,18 @@ files on the same AVD:
 | Deflated | 79.9 s | — |
 | Deflated | 98.5 s | 2.6 G |
 | **Stored** | **156.3 s** | 1.3 G (86% full) |
+| Stored | **49.2 s** | 4.2 G free pre-install (110,804 files, new asset set) |
 
 Do not read that as "STORED is slower" — the runs are not comparable. Removing inflate can only
 remove CPU work, and the confound is obvious in the third column: the stored APK is 96 MB
 bigger, so by the last run the 10 G partition finished at 86% full, and ext4/f2fs degrade badly
 as they fill. Note also the two *identical* deflated runs differ by 23%, so this AVD's I/O noise
 floor is already high.
+
+The fourth run (49.2 s, on a device with room to spare) is the fastest of the four and the only
+STORED run not made against a nearly-full partition, which supports free space being the
+dominant term rather than the codec — but it also packed a different asset set, so it is still
+not a controlled comparison.
 
 The honest conclusion is that the earlier measurement stands — the unpack is syscall-bound at
 ~720–880 µs/file — and the codec was never the term that mattered. STORED is kept for the APK
@@ -229,6 +237,147 @@ Diagnostic note for next time: **verify the APK, not the timestamps.** File mtim
 decisive check is to unzip `classes*.dex` from the APK and grep for the method name, with a
 string you know is present (e.g. `AoCGame`) as a positive control — a dex `method_id` cannot
 exist without its name in the string pool, so absence is proof.
+
+
+### 11. ASM: the logo-triggered `ServiceRibbon_Manager` sabotage
+
+**A second copy of the image-list trap, with a different trigger.** Change 4 neutered
+`HistoryManager$1.update()` and the corruption went away — until the asset set was swapped for a
+modded one, at which point black-blob borders and striped menus came straight back with the
+HistoryManager patch still verifiably applied (checked in the stripped jar, the patched jar and
+the APK's `classes.dex`). Two independent traps, same payload shape.
+
+The payload is laundered through three deliberately innocent names, so it mentions neither
+`IMGManager` nor the logo:
+
+```java
+Core.getGL()               -> return Images.gameLogo;              // Core:9483
+Images.mainMenuEdge2 = getGL();                                    // Core:1099
+AoCGame.disposeImages()    -> return IMGManager.getImages();       // AoCGame:544
+```
+
+Then, at the end of `ServiceRibbon_Manager.loadSRImages()`:
+
+```java
+int oRa = IMGManager.getIMG(Images.mainMenuEdge2).getWidth()
+        + IMGManager.getIMG(Images.mainMenuEdge2).getHeight();
+...
+if (oRa != 306 && oRa != 278 && oRa != 550) {
+   AoCGame.disposeImages().remove(5);
+   AoCGame.disposeImages().add((Image)AoCGame.disposeImages().get(1));
+}
+```
+
+`oRa` is **the game logo's width + height**, tested against a whitelist of sanctioned logo
+sizes. Removing element 5 slides every later entry down one, so each of the ~325 `Images.*`
+constants resolves to its neighbour's texture; re-adding a duplicate of index 1 preserves the
+list length so nothing looks obviously wrong. Identical mechanism, symptoms and silence to
+change 4.
+
+Confirmed by comparing the two asset trees:
+
+| asset set | `UI/interface/*/game_logo.png` | w + h | result |
+|---|---|---|---|
+| working | 220 x 86 | **306** | whitelisted, no sabotage |
+| modded | 512 x 94 | **606** | trips the guard |
+
+306 = 220+86 is the stock logo; 550 = 512+38; 278 is the third sanctioned size.
+
+**Two possible fixes.** `ServiceRibbonPatcher` removes the eleven payload instructions and
+leaves the guard and its branch targets alone, so both arms of the `if` now do nothing — chosen
+because it keeps any logo art. The zero-code alternative is to ship a logo whose width + height
+lands on 306, 278 or 550; **512 x 38** keeps the new wide format and passes.
+
+
+**Verified on device (2026-08-22).** Built against `assetsnew/` (the modded set, logo 512x94 ->
+606, i.e. the guard *does* trip), installed on the 16 KB-page AVD, launched: main menu renders
+correctly — flags in the Challenges panel, crisp text, no striped panels, no black-blob borders,
+no tiled logo. The APK's `classes.dex` was checked directly: zero `disposeImages` calls remain in
+`loadSRImages`.
+
+One cosmetic remnant, and it is the proof the diagnosis was right: the guards are all still in
+place, so the fingerprint still detects the modified logo — the main menu's session button reads
+"Age of History 2: Definitive Edition" (the `Button_Classic_LRMain_DC` arm in
+`Messages/Gift/R/Menu_Main`). The check fires; it just cannot corrupt the image list any more.
+Shipping a **512 x 38** logo (550, whitelisted) silences that tell and the ~29 others without any
+further bytecode patching.
+
+
+### 12. Asset: trailing newline in the map-scale index file
+
+**Symptom.** Changing the map resolution bounced straight back to the main menu, with **nothing
+in logcat at all** — no exception, no error.
+
+**Cause.** `Menu_SelectMapType_Scale`'s constructor parses the scale list with no guard:
+
+```java
+FileHandle f = FileManager.loadFile("map/" + ... + "data/scales/provinces/Age_of_Civilizations");
+String[] tagsSPLITED = f.readString().split(";");
+for (int i = 0; i < tagsSPLITED.length; ++i)
+   tempScales.add(Integer.parseInt(tagsSPLITED[i]));   // unguarded
+```
+
+The file ended with a newline, which survives `split(";")` and reaches `parseInt`. Verified by
+running the four cases rather than reasoning about them:
+
+| file bytes | tokens | last token | `parseInt` |
+|---|---|---|---|
+| `1;3;4;5;7;10;30;\n` | 8 | `\n` | **throws** |
+| `1;3;4;5;7;10;30\n` | 7 | `30\n` | **throws** |
+| `1;3;4;5;7;10;30;` | 7 | `30` | ok |
+| `1;3;4;5;7;10;30` | 7 | `30` | ok |
+
+The constructor throws before the menu object exists, so the game falls back to the main menu.
+Nothing logs it.
+
+**Fix.** Strip the trailing newline: `printf '1;3;4;5;7;10;30;' > .../Age_of_Civilizations`.
+Confirmed on device — the trailing `;` is harmless, Java's `split` drops trailing empty tokens.
+
+**This was never an assetsnew regression.** The old, "working" tree ships the *same* file with a
+trailing newline (`…30;\n`) and fails identically — its last token is `\n` instead of `30\n`.
+Swapping asset sets was never going to move this bug; the old set simply had never been tested
+through that menu. A survey of all 20 `Age_of_Civilizations` index files found this to be the
+only one affected.
+
+> **Two hypotheses died here first — do not re-run them.**
+>
+> - *Missing `map/Earta/data/DefinedScales.json`.* It is genuinely absent from **both** trees,
+>   and `MapScale.initDefinedScales()` has a real latent bug in its catch block —
+>   `definedScalesLength = defScales.definedScale_Default` assigns a default *index* (15) to a
+>   *length* whose success-path value is `definedScales.length` (30). Supplying the file was
+>   tested on device and **did not fix the symptom**, so it was reverted rather than shipped
+>   alongside the real fix. The latent length bug is still there if anything ever depends on it.
+> - *The `game/leaders/*` and `scenarios/*_INFO.json` exceptions in logcat.* Loud, with full
+>   stack traces, and tempting. They fire on **both** asset sets during initial load and are
+>   unrelated to this menu.
+>
+> The lesson that actually mattered: the failure logged **nothing**, and the loud exceptions in
+> the log were the wrong ones. Reading the constructor beat chasing stack traces.
+
+**`GdxAssetBase` logging is far too loud for this kind of work.** It prints
+`CRITICAL: File not found` on every probe — the game legitimately probes thousands of optional
+paths (`map/Earta/army_boxes/NNNN` alone runs to thousands), which buries real stack traces and
+makes a monitor unusable. Filter with `grep -v "\[GdxAssetBase\] CRITICAL: File not found"`
+before reading a log, or consider demoting it to a debug flag.
+
+### Why the first search for this missed it — worth knowing
+
+The obvious sweep is "which classes call `IMGManager.getImages()` and mutate the result". That
+returns exactly one hit (`AoCGame`, a benign `clear` in `dispose()`) and looks like proof there
+is no second trap. It is not: this trap calls `AoCGame.disposeImages()` instead. Searches worth
+running before concluding a jar is clean:
+
+- callers of **aliases**, not just the real accessor (`disposeImages`, `getGL`)
+- the whitelist constants as **bytecode operands** — 306/278/550 are `sipush` operands and never
+  appear in the constant pool, so `javap | grep` over sources finds nothing
+- `ref/` decompiles only 2276 of 7269 classes, so grepping Java source silently skips two thirds
+  of the jar; one of the fingerprint sites lives in `Messages/Gift/R/Menu_Main`, a second class
+  named `Menu_Main` in an unrelated package, which is not decompiled at all
+
+Scanning the bytecode for `sipush 306/278/550` plus an image measurement finds **30** classes
+carrying this fingerprint. Most only swap a button label to "Age of History 2: Definitive
+Edition" — branding tells, harmless. Only `ServiceRibbon_Manager` pairs the fingerprint with a
+list mutation. If a third trap ever surfaces, that scan is the way to find it.
 
 ### 1. Build pipeline — incremental zip64 packing (`15f72af`)
 

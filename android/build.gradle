@@ -197,7 +197,15 @@ tasks.register('packAssetsZip', Zip) {
   description = 'Packs assets/ into a single assets.zip that ships inside the APK.'
   archiveFileName = 'assets.zip'
   destinationDirectory = layout.buildDirectory.dir('assets-zip')
-  from rootProject.file('assets')
+  // Which asset tree to pack. assets/ now holds the modded set (the old stock tree was
+  // promoted away and deleted), so a plain build is correct and needs no flag. The property
+  // stays because it costs nothing and makes A/B-ing a second tree possible without moving
+  // 1.6 GB:  ./gradlew :android:assembleDebug -PassetsDir=some_other_tree
+  //
+  // If you ever do swap trees by renaming, note two Windows traps: assets/game/shader/ is
+  // tracked in git, so a missing assets/ shows up as deleted files, and an open IDE holds
+  // directory handles on a 111k-file tree, which makes the rename fail outright.
+  from rootProject.file(providers.gradleProperty('assetsDir').getOrElse('assets'))
   // aaptOptions.noCompress 'zip' keeps AAPT from recompressing this, so whatever compression
   // is chosen here is what ends up in the APK.
   //

@@ -72,3 +72,6 @@ docs/for-claude/
 *.swp
 *~
 *.*#
+
+# Python bytecode cache from tools/
+__pycache__/

@@ -32,13 +32,21 @@ Make sure **Zulu OpenJDK 25** is installed:
 *(Ensure `JAVA_HOME` points to your Java 25 installation or that Java 25 is the active JDK in your terminal).*
 
 #### B. Android SDK
-- Requires Android SDK with `compileSdk 36` (Android API 36) and platform tools.
-- Set `ANDROID_HOME` / `ANDROID_SDK_ROOT` or add a `local.properties` file in the root folder:
-  ```properties
-  sdk.dir=C:\\Users\\<username>\\AppData\\Local\\Android\\Sdk   # on Windows
-  # sdk.dir=/Users/<username>/Library/Android/sdk             # on macOS
-  # sdk.dir=/home/<username>/Android/Sdk                      # on Linux
-  ```
+The easiest way to set up the Android SDK:
+1. Download and install [Android Studio](https://developer.android.com/studio).
+2. Launch Android Studio and walk through the initial setup wizard (accept the default components and licenses to download the SDK).
+3. The SDK will be installed to the default location:
+   - **Windows:** `C:\Users\<username>\AppData\Local\Android\Sdk`
+   - **macOS:** `/Users/<username>/Library/Android/sdk`
+   - **Linux:** `/home/<username>/Android/Sdk`
+4. Point this project to your SDK by creating a `local.properties` file in the repository root:
+   ```properties
+   sdk.dir=C:\\Users\\<username>\\AppData\\Local\\Android\\Sdk   # on Windows
+   # sdk.dir=/Users/<username>/Library/Android/sdk             # on macOS
+   # sdk.dir=/home/<username>/Android/Sdk                      # on Linux
+   ```
+   *(Or configure the `ANDROID_HOME` / `ANDROID_SDK_ROOT` environment variable).*
+   *(Gradle will automatically download API 36 / `compileSdk 36` on the first build if not already present).*
 
 #### C. Build Inputs
 - Put your desktop `game.jar` into: `libs/game.jar`

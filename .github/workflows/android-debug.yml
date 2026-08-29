@@ -1,0 +1,121 @@
+name: Android debug APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upload_artifact:
+        description: 'Upload the APK as a workflow artifact (~1.8 GB, slow)'
+        type: boolean
+        default: true
+      refresh_inputs:
+        description: 'Re-fetch game.jar and assets from object storage'
+        type: boolean
+        default: true
+
+# One build at a time. The jobs share a single Gradle daemon, a single ~/.gradle and a
+# single /srv/aoh2de asset cache on this VM; two concurrent runs would corrupt all three.
+# Cancelling in-progress runs is deliberate — a superseded build of an old commit is not
+# worth the ~10 minutes it occupies the only runner.
+concurrency:
+  group: android-debug
+  cancel-in-progress: true
+
+env:
+  AOH2DE_CACHE: /srv/aoh2de
+  ANDROID_SDK_ROOT: /opt/android-sdk
+  ANDROID_HOME: /opt/android-sdk
+  JAVA_HOME: /usr/lib/jvm/temurin-25-jdk-amd64
+  # Gradle's own 4 GB heap is set in gradle.properties; this caps the Kotlin/AGP workers
+  # that would otherwise each claim a default heap on top of it.
+  GRADLE_OPTS: -Dorg.gradle.workers.max=4
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, aoh2de-builder]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          "$JAVA_HOME/bin/java" -version
+          test -d "$ANDROID_SDK_ROOT/platforms/android-36" \
+            || { echo "::error::compileSdk 36 platform missing — re-run scripts/ci/provision-vm.sh"; exit 1; }
+
+      - name: Fetch build inputs
+        # game.jar and assets/ are gitignored (27 MB and ~2 GB), so a clean checkout has
+        # neither. Skippable on manual runs when the cache is known-current.
+        if: github.event_name != 'workflow_dispatch' || inputs.refresh_inputs
+        env:
+          AOH2DE_S3_BUCKET: ${{ secrets.AOH2DE_S3_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_S3_ENDPOINT: ${{ secrets.AWS_S3_ENDPOINT }}
+        run: ./scripts/ci/fetch-inputs.sh
+
+      - name: Stage inputs into the workspace
+        run: |
+          set -euo pipefail
+          # stripGameJar reads a hardcoded libs/game.jar, so this one has to be copied in.
+          # 27 MB per run, which is noise next to the rest of the build.
+          mkdir -p libs
+          cp "$AOH2DE_CACHE/libs/game.jar" libs/game.jar
+
+          # assets/game/shader/ is the one part of the asset tree tracked in git (see
+          # .gitignore) — hand-edited GLSL that nothing else records. The cached tree came
+          # from object storage and may predate those edits, so git wins here.
+          rsync -a --delete assets/game/shader/ "$AOH2DE_CACHE/assets/game/shader/"
+
+      - name: Assemble debug APK
+        # -PassetsDir points at the cache instead of ./assets because actions/checkout runs
+        # `git clean -ffdx`, which would delete a 2 GB in-workspace assets tree every run.
+        # The property is already supported by packAssetsZip in android/build.gradle.
+        run: |
+          # The daemon stays ON, contrary to the usual CI habit: gradle.properties explains
+          # that the retained VFS is what stops the ~125k-file asset tree being re-stat-ed
+          # (~11.6s) every build, and this runner is long-lived enough to benefit.
+          ./gradlew :android:assembleDebug \
+            -PassetsDir="$AOH2DE_CACHE/assets" \
+            --stacktrace
+
+      - name: Locate APK
+        id: apk
+        run: |
+          set -euo pipefail
+          apk=$(find android/build/outputs/apk/debug -name '*.apk' -print -quit)
+          test -n "$apk" || { echo "::error::no APK produced"; exit 1; }
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+          echo "### Debug APK" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -lh "$apk" >> "$GITHUB_STEP_SUMMARY"
+          unzip -l "$apk" | tail -1 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep a copy on the VM
+        # Always available at a stable path, whether or not the (slow, ~1.8 GB) artifact
+        # upload below is enabled.
+        run: |
+          set -euo pipefail
+          dest="$AOH2DE_CACHE/out/${GITHUB_SHA:0:12}.apk"
+          cp "${{ steps.apk.outputs.path }}" "$dest"
+          ln -sf "$dest" "$AOH2DE_CACHE/out/latest.apk"
+          # Keep the ten most recent; each is ~1.8 GB.
+          ls -1t "$AOH2DE_CACHE"/out/*.apk | tail -n +11 | xargs -r rm -f
+
+      - name: Upload APK artifact
+        if: github.event_name != 'workflow_dispatch' || inputs.upload_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aoh2de-debug-${{ github.sha }}
+          path: ${{ steps.apk.outputs.path }}
+          # The APK's assets.zip is already STORED (see packAssetsZip) and the rest is
+          # signed/aligned output — re-compressing on upload burns CPU for ~nothing.
+          compression-level: 0
+          retention-days: 7

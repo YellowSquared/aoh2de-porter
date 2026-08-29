@@ -1,33 +1,90 @@
 # aoh2de-porter
 
-A [libGDX](https://libgdx.com/) project generated with [gdx-liftoff](https://github.com/libgdx/gdx-liftoff).
+Android port of Age of History II: Definitive Edition (libGDX).
 
-This project was generated with a template including simple application launchers and an `ApplicationAdapter` extension that draws libGDX logo.
+---
 
-## Platforms
+## How to Build Debug APK
 
-- `core`: Main module with the application logic shared by all platforms.
-- `android`: Android mobile platform. Needs Android SDK.
-- `ios`: iOS mobile platform using RoboVM.
+### 1. Prerequisites
 
-## Gradle
+#### A. Install Azul Zulu Java 25
+Make sure **Zulu OpenJDK 25** is installed:
 
-This project uses [Gradle](https://gradle.org/) to manage dependencies.
-The Gradle wrapper was included, so you can run Gradle tasks using `gradlew.bat` or `./gradlew` commands.
-Useful Gradle tasks and flags:
+- **mise (recommended):**
+  ```bash
+  mise use -g java@zulu-25
+  ```
+- **Windows (winget):**
+  ```powershell
+  winget install Azul.Zulu.25.JDK
+  ```
+- **macOS (Homebrew):**
+  ```bash
+  brew install --cask zulu@25
+  ```
+- **Linux / macOS (SDKMAN!):**
+  ```bash
+  sdk install java 25-zulu
+  ```
+- Or download directly from [Azul Zulu Downloads](https://www.azul.com/downloads/?version=java-25&package=jdk).
 
-- `--continue`: when using this flag, errors will not stop the tasks from running.
-- `--daemon`: thanks to this flag, Gradle daemon will be used to run chosen tasks.
-- `--offline`: when using this flag, cached dependency archives will be used.
-- `--refresh-dependencies`: this flag forces validation of all dependencies. Useful for snapshot versions.
-- `android:lint`: performs Android project validation.
-- `build`: builds sources and archives of every project.
-- `cleanEclipse`: removes Eclipse project data.
-- `cleanIdea`: removes IntelliJ project data.
-- `clean`: removes `build` folders, which store compiled classes and built archives.
-- `eclipse`: generates Eclipse project data.
-- `idea`: generates IntelliJ project data.
-- `test`: runs unit tests (if any).
+*(Ensure `JAVA_HOME` points to your Java 25 installation or that Java 25 is the active JDK in your terminal).*
 
-Note that most tasks that are not specific to a single project can be run with `name:` prefix, where the `name` should be replaced with the ID of a specific project.
-For example, `core:clean` removes `build` folder only from the `core` project.
+#### B. Android SDK
+- Requires Android SDK with `compileSdk 36` (Android API 36) and platform tools.
+- Set `ANDROID_HOME` / `ANDROID_SDK_ROOT` or add a `local.properties` file in the root folder:
+  ```properties
+  sdk.dir=C:\\Users\\<username>\\AppData\\Local\\Android\\Sdk   # on Windows
+  # sdk.dir=/Users/<username>/Library/Android/sdk             # on macOS
+  # sdk.dir=/home/<username>/Android/Sdk                      # on Linux
+  ```
+
+#### C. Build Inputs
+- Put your desktop `game.jar` into: `libs/game.jar`
+- Put the game data assets folder into: `assets/`
+
+---
+
+### 2. Build the Debug APK
+
+Run the Gradle build command in the root folder:
+
+- **Windows:**
+  ```powershell
+  .\gradlew.bat :android:assembleDebug
+  ```
+
+- **Linux / macOS:**
+  ```bash
+  ./gradlew :android:assembleDebug
+  ```
+
+Your output APK will be generated at:
+```
+android/build/outputs/apk/debug/android-debug.apk
+```
+
+---
+
+### 3. (Optional) Install & Run
+
+To build, install to an attached device or running emulator, and launch automatically:
+
+- **Windows:**
+  ```powershell
+  .\gradlew.bat :android:run
+  ```
+- **Linux / macOS:**
+  ```bash
+  ./gradlew :android:run
+  ```
+
+---
+
+## Project Structure
+
+- `android`: Android mobile launcher, asset packager, and lifecycle handler.
+- `core`: Shared game application logic and runtime helpers.
+- `patch`: Bytecode patchers (ASM) run against `game.jar` at build time.
+- `ios`: iOS platform launcher (RoboVM).

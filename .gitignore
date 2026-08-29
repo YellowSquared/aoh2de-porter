@@ -62,7 +62,17 @@ libs/game.jar
 ## in PORTING-NOTES. Regenerable from the vendored jar, which is itself untracked above.
 ref/
 
-## AI / internal docs
+## AI / LLM config and docs
+GEMINI.md
+.gemini/
+CLAUDE.md
+.claude/
+AGENTS.md
+.agents/
+.cursor/
+.cursorrules
+.windsurfrules
+.github/copilot-instructions.md
 docs/for-claude/
 
 ## Misc

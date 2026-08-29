@@ -32,7 +32,16 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # unzip: sdkmanager + the wrapper distribution. git: checkout. rsync: shader overlay in
 # the workflow. awscli comes from pip/snap on some images; apt's is fine for s3 sync.
-apt-get install -y -qq curl unzip git rsync ca-certificates gnupg awscli zstd
+apt-get install -y -qq curl unzip git rsync ca-certificates gnupg zstd
+
+if ! command -v aws >/dev/null 2>&1; then
+  log "AWS CLI v2"
+  tmp=$(mktemp -d)
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "${tmp}/awscliv2.zip"
+  unzip -q "${tmp}/awscliv2.zip" -d "${tmp}"
+  "${tmp}/aws/install"
+  rm -rf "${tmp}"
+fi
 
 log "Temurin JDK ${JDK_VERSION}"
 install -d -m 0755 /etc/apt/keyrings
